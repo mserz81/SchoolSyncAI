@@ -6,11 +6,21 @@ import cookieParser from "cookie-parser";
 import session from "express-session";
 import cors from "cors";
 import dotenv from "dotenv";
+import jwt from "jsonwebtoken";
 import * as admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import firebaseConfig from "./firebase-applet-config.json" assert { type: "json" };
 
 dotenv.config();
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('JWT_SECRET environment variable is required in production');
+}
+const SESSION_SECRET = process.env.SESSION_SECRET;
+if (!SESSION_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('SESSION_SECRET environment variable is required in production');
+}
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
@@ -30,6 +40,12 @@ const PORT = 3000;
 // Extend Request type for Firebase Auth
 interface AuthRequest extends Request {
   user?: admin.auth.DecodedIdToken;
+}
+
+declare module "express-session" {
+  interface SessionData {
+    uid?: string;
+  }
 }
 
 // Middleware to verify Firebase ID Token
@@ -68,19 +84,20 @@ app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'school-sync-secret',
+  secret: SESSION_SECRET || 'school-sync-secret',
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,
   cookie: { 
     secure: true, 
     sameSite: 'none',
-    httpOnly: true
+    httpOnly: true,
+    maxAge: 15 * 60 * 1000 // 15 minutes for auth flow
   }
 }));
 
 // Helper to get Google tokens for a user
 async function getGoogleTokens(uid: string) {
-  const tokenDoc = await (await firestore).collection('server_tokens').doc(uid).get();
+  const tokenDoc = await firestore.collection('server_tokens').doc(uid).get();
   if (!tokenDoc.exists) {
     throw new Error('Google account not connected');
   }
@@ -88,29 +105,47 @@ async function getGoogleTokens(uid: string) {
 }
 
 // API Routes
-app.get("/api/auth/url", (req, res) => {
-  const { uid } = req.query;
-  if (!uid) return res.status(400).json({ error: 'UID is required' });
+app.get("/api/auth/url", authenticate, (req: AuthRequest, res) => {
+  const uid = req.user?.uid;
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+
+  // Store uid in session to prevent OAuth CSRF/Account Linking
+  req.session.uid = uid; 
 
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     getRedirectUri()
   );
+
+  // Generate a signed state bound to the user
+  const state = jwt.sign({ uid }, JWT_SECRET || 'dev-secret', { expiresIn: '15m' });
+
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     scope: SCOPES,
     prompt: 'consent',
-    state: uid as string
+    state: state
   });
   res.json({ url: authUrl });
 });
 
 app.get("/auth/callback", async (req, res) => {
-  const { code, state: uid } = req.query;
-  if (!uid || !code) return res.status(400).send("Missing parameters");
+  const { code, state } = req.query;
+  if (!state || !code) return res.status(400).send("Missing parameters");
 
   try {
+    // Verify the state JWT
+    const decoded = jwt.verify(state as string, JWT_SECRET || 'dev-secret') as { uid: string };
+    const uid = decoded.uid;
+
+    // Verify that the user finishing the flow is the same user who initiated it
+    const sessionUid = req.session.uid;
+    if (!sessionUid || sessionUid !== uid) {
+      console.error("OAuth CSRF detected or session expired", { sessionUid, jwtUid: uid });
+      return res.status(401).send("Authentication failed: Session mismatch or expired. Please try again.");
+    }
+
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
@@ -119,14 +154,17 @@ app.get("/auth/callback", async (req, res) => {
     const { tokens } = await oauth2Client.getToken(code as string);
     
     // Store tokens securely in Firestore (server-side only)
-    await (await firestore).collection('server_tokens').doc(uid as string).set(tokens);
+    await firestore.collection('server_tokens').doc(uid).set(tokens);
+
+    const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
 
     res.send(`
       <html>
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
+              const targetOrigin = '${appUrl}' || window.location.origin;
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, targetOrigin);
               window.close();
             } else {
               window.location.href = '/';
@@ -137,8 +175,8 @@ app.get("/auth/callback", async (req, res) => {
       </html>
     `);
   } catch (error) {
-    console.error("Error exchanging code for tokens:", error);
-    res.status(500).send("Authentication failed");
+    console.error("Error exchanging code for tokens or verifying state:", error);
+    res.status(401).send("Authentication failed: Invalid state or code");
   }
 });
 
@@ -379,41 +417,49 @@ async function startServer() {
   }
 
   // Delete user data (GDPR compliance)
-app.post("/api/user/delete", async (req, res) => {
+app.post("/api/user/delete", authenticate, async (req: AuthRequest, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-    const idToken = authHeader.split('Bearer ')[1];
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const uid = decodedToken.uid;
-
-    console.log(`Starting data deletion for user: ${uid}`);
+    // 1. Get user profile to find familyId
+    const userDoc = await firestore.collection('users').doc(uid).get();
+    const userData = userDoc.data();
+    const familyId = userData?.familyId;
 
     const batch = firestore.batch();
 
-    // 1. Delete user profile
+    // 2. Handle family membership
+    if (familyId) {
+      const familyRef = firestore.collection('families').doc(familyId);
+      const familyDoc = await familyRef.get();
+      const familyData = familyDoc.data();
+      
+      if (familyData && familyData.members) {
+        const updatedMembers = familyData.members.filter((m: string) => m !== uid);
+        if (updatedMembers.length === 0) {
+          // Delete family and its events subcollection
+          const eventsSnapshot = await familyRef.collection('events').get();
+          eventsSnapshot.forEach(doc => batch.delete(doc.ref));
+          batch.delete(familyRef);
+        } else {
+          // Just remove user from members
+          batch.update(familyRef, { members: updatedMembers });
+        }
+      }
+    }
+
+    // 3. Delete user profile
     const userRef = firestore.collection('users').doc(uid);
     batch.delete(userRef);
 
-    // 2. Delete user tokens
+    // 4. Delete user tokens
     const tokensRef = firestore.collection('server_tokens').doc(uid);
     batch.delete(tokensRef);
 
-    // 3. Delete user events (need to find them first)
-    const eventsSnapshot = await firestore.collection('events')
-      .where('userId', '==', uid)
-      .get();
-    
-    eventsSnapshot.forEach(doc => {
-      batch.delete(doc.ref);
-    });
-
     await batch.commit();
 
-    // 4. Delete Firebase Auth account
+    // 5. Delete Firebase Auth account
     await admin.auth().deleteUser(uid);
 
     console.log(`Successfully deleted all data for user: ${uid}`);

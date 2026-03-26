@@ -214,7 +214,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 
 // --- Assistant Briefing Component ---
 function AssistantBriefing({ events, profile, conflicts }: { events: SchoolEvent[], profile: any, conflicts: Conflict[] }) {
-  const upcomingCount = events.filter(e => {
+  const upcomingCount = (events || []).filter(e => {
     const d = new Date(e.start);
     const now = new Date();
     const next7Days = new Date();
@@ -222,8 +222,8 @@ function AssistantBriefing({ events, profile, conflicts }: { events: SchoolEvent
     return d >= now && d <= next7Days;
   }).length;
 
-  const actionRequired = events.filter(e => e.category === 'Action Required/Deadlines' && e.status !== 'synced').length;
-  const transitions = events.filter(e => e.category === 'Transition/Disruption' && e.status !== 'synced');
+  const actionRequired = (events || []).filter(e => e.category === 'Action Required/Deadlines' && e.status !== 'synced').length;
+  const transitions = (events || []).filter(e => e.category === 'Transition/Disruption' && e.status !== 'synced');
 
   return (
     <motion.div 
@@ -250,22 +250,22 @@ function AssistantBriefing({ events, profile, conflicts }: { events: SchoolEvent
             <p className="text-slate-600 text-sm md:text-base leading-relaxed font-medium break-words">
               I've analyzed your school communications. You have <span className="text-brand-600 font-bold">{upcomingCount} events</span> coming up this week, and <span className="text-status-amber-text font-bold">{actionRequired} items</span> that might need your attention.
             </p>
-            {transitions.length > 0 && (
+            {(transitions || []).length > 0 && (
               <div className="p-4 bg-amber-50 border border-amber-100 rounded-2xl flex items-start gap-3 animate-pulse">
                 <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-bold text-amber-900">Transition Alert</p>
-                  <p className="text-xs text-amber-700 font-medium">I've detected {transitions.length} schedule disruption(s). Check your inbox for de-escalation tips.</p>
+                  <p className="text-xs text-amber-700 font-medium">I've detected {(transitions || []).length} schedule disruption(s). Check your inbox for de-escalation tips.</p>
                 </div>
               </div>
             )}
-            {conflicts.length > 0 && (
+            {(conflicts || []).length > 0 && (
               <div className="p-4 bg-red-50 border border-red-100 rounded-2xl flex items-start gap-3">
                 <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
                 <div>
                   <p className="text-sm font-bold text-red-900">Calendar Conflict Detected</p>
                   <p className="text-xs text-red-700 font-medium">
-                    {conflicts.length} school event(s) overlap with your personal calendar. 
+                    {(conflicts || []).length} school event(s) overlap with your personal calendar. 
                     Ask me for help resolving these!
                   </p>
                 </div>
@@ -320,7 +320,7 @@ function WeekCalendar({ events, onDayClick }: { events: SchoolEvent[], onDayClic
   };
 
   const getEventsForDate = (date: Date) => {
-    return events.filter(event => {
+    return (events || []).filter(event => {
       const eventDate = new Date(event.start);
       return eventDate.getDate() === date.getDate() && 
              eventDate.getMonth() === date.getMonth() && 
@@ -374,11 +374,11 @@ function WeekCalendar({ events, onDayClick }: { events: SchoolEvent[], onDayClic
                 }`}>
                   {date.getDate()}
                 </span>
-                {dayEvents.length > 0 && (
+                {(dayEvents || []).length > 0 && (
                   <div className="flex items-center gap-1">
                     <div className="w-1.5 h-1.5 bg-brand-400 rounded-full"></div>
                     <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-widest hidden sm:inline">
-                      {dayEvents.length}
+                      {(dayEvents || []).length}
                     </span>
                   </div>
                 )}
@@ -437,7 +437,7 @@ function MonthCalendar({ events, onDayClick }: { events: SchoolEvent[], onDayCli
   }
 
   const getEventsForDay = (day: number) => {
-    return events.filter(event => {
+    return (events || []).filter(event => {
       const eventDate = new Date(event.start);
       return eventDate.getDate() === day && 
              eventDate.getMonth() === month && 
@@ -496,11 +496,11 @@ function MonthCalendar({ events, onDayClick }: { events: SchoolEvent[], onDayCli
                     }`}>
                       {day}
                     </span>
-                    {dayEvents.length > 0 && (
+                    {(dayEvents || []).length > 0 && (
                       <div className="flex items-center gap-1">
                         <div className="w-1.5 h-1.5 bg-brand-400 rounded-full"></div>
                         <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-widest hidden sm:inline">
-                          {dayEvents.length}
+                          {(dayEvents || []).length}
                         </span>
                       </div>
                     )}
@@ -522,9 +522,9 @@ function MonthCalendar({ events, onDayClick }: { events: SchoolEvent[], onDayCli
                         {event.title}
                       </div>
                     ))}
-                    {dayEvents.length > 3 && (
+                    {(dayEvents || []).length > 3 && (
                       <div className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-widest pl-1 mt-1">
-                        + {dayEvents.length - 3} more
+                        + {(dayEvents || []).length - 3} more
                       </div>
                     )}
                   </div>
@@ -557,8 +557,8 @@ function ChatAssistant({ events, profile, retrievedEmails, calendarEvents, confl
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
-  const pendingCount = events.filter(e => e.status === 'pending').length;
-  const upcomingCount = events.filter(e => {
+  const pendingCount = (events || []).filter(e => e.status === 'pending').length;
+  const upcomingCount = (events || []).filter(e => {
     const d = new Date(e.start);
     const now = new Date();
     const next7Days = new Date();
@@ -597,7 +597,7 @@ function ChatAssistant({ events, profile, retrievedEmails, calendarEvents, confl
           children: profile?.children
         })}
         
-        Upcoming Events (Next 7 Days): ${JSON.stringify(events.filter(e => {
+        Upcoming Events (Next 7 Days): ${JSON.stringify((events || []).filter(e => {
           const d = new Date(e.start);
           const now = new Date();
           const next7Days = new Date();
@@ -605,17 +605,17 @@ function ChatAssistant({ events, profile, retrievedEmails, calendarEvents, confl
           return d >= now && d <= next7Days;
         }).map(e => ({ title: e.title, start: e.start, category: e.category })))}
         
-        Pending Events (Need Review): ${JSON.stringify(events.filter(e => e.status === 'pending').map(e => ({ title: e.title, start: e.start })))}
+        Pending Events (Need Review): ${JSON.stringify((events || []).filter(e => e.status === 'pending').map(e => ({ title: e.title, start: e.start })))}
         
-        Recent Emails: ${JSON.stringify(retrievedEmails.slice(0, 5).map(e => ({ subject: e.subject, from: e.from, summary: e.summary })))}
+        Recent Emails: ${JSON.stringify((retrievedEmails || []).slice(0, 5).map(e => ({ subject: e.subject, from: e.from, summary: e.summary })))}
         
-        Calendar Conflicts: ${JSON.stringify(conflicts.map(c => ({
+        Calendar Conflicts: ${JSON.stringify((conflicts || []).map(c => ({
           schoolEvent: c.schoolEvent.title,
           conflictingEvent: c.calendarEvent.summary,
           time: c.schoolEvent.start
         })))}
         
-        Personal Calendar (Next 30 Days): ${JSON.stringify(calendarEvents.slice(0, 10).map(e => ({
+        Personal Calendar (Next 30 Days): ${JSON.stringify((calendarEvents || []).slice(0, 10).map(e => ({
           summary: e.summary,
           start: e.start.dateTime || e.start.date
         })))}
@@ -774,7 +774,7 @@ Guidelines:
             
             {/* Messages */}
             <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 md:p-8 space-y-4 md:space-y-6 relative z-10 scroll-smooth">
-              {messages.length === 0 && (
+              {(messages || []).length === 0 && (
                 <div className="space-y-4 md:space-y-6 py-2 md:py-4">
                   <p className="text-base md:text-lg text-slate-600 leading-relaxed font-medium">
                     {pendingCount > 0 
@@ -1215,6 +1215,10 @@ function SchoolSyncApp() {
   // --- Google OAuth ---
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
+      // Validate origin
+      if (event.origin !== window.location.origin) {
+        return;
+      }
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && user) {
         console.log("Received Google auth success, updating profile");
         const profileRef = doc(db, 'users', user.uid);
@@ -1229,7 +1233,12 @@ function SchoolSyncApp() {
   const connectGoogle = async () => {
     if (!user) return;
     try {
-      const response = await fetch(`/api/auth/url?uid=${user.uid}`);
+      const idToken = await user.getIdToken();
+      const response = await fetch(`/api/auth/url`, {
+        headers: {
+          'Authorization': `Bearer ${idToken}`
+        }
+      });
       const { url } = await response.json();
       window.open(url, 'google_oauth', 'width=600,height=700');
     } catch (err) {
@@ -1343,16 +1352,24 @@ function SchoolSyncApp() {
     return "";
   };
 
-  const callGeminiWithRetry = async (prompt: string, maxRetries = 3) => {
+  const callGeminiWithRetry = async (prompt: string, schema?: any, maxRetries = 3) => {
     if (!ai) throw new Error("AI service not initialized");
     
     let lastError: any;
     for (let i = 0; i < maxRetries; i++) {
       try {
+        const config: any = { 
+          responseMimeType: "application/json"
+        };
+        
+        if (schema) {
+          config.responseSchema = schema;
+        }
+
         const result = await ai.models.generateContent({
           model: "gemini-3-flash-preview",
           contents: prompt,
-          config: { responseMimeType: "application/json" }
+          config
         });
         return result;
       } catch (err: any) {
@@ -1536,8 +1553,8 @@ function SchoolSyncApp() {
         aiResponse: aiResponse,
         timestamp: new Date().toISOString()
       });
-      const extractedEvents = aiResponse.events || [];
-      const emailMetadata = aiResponse.emailMetadata || {};
+      const extractedEvents = aiResponse?.events || [];
+      const emailMetadata = aiResponse?.emailMetadata || {};
       const batchEvents: SchoolEvent[] = [...events];
 
       // Enrich formatted emails with AI metadata
@@ -1726,8 +1743,8 @@ function SchoolSyncApp() {
         aiResponse: aiResponse,
         timestamp: new Date().toISOString()
       });
-      const extractedEvents = aiResponse.events || [];
-      const metadata = aiResponse.metadata || {};
+      const extractedEvents = aiResponse?.events || [];
+      const metadata = aiResponse?.metadata || {};
 
       // Update local state with new metadata
       setRetrievedEmails(prev => prev.map(e => e.id === email.id ? { ...e, ...metadata } : e));
@@ -2104,13 +2121,13 @@ function SchoolSyncApp() {
     }
   };
 
-  const categories = useMemo(() => Array.from(new Set(retrievedEmails.map(e => e.category).filter(Boolean))) as string[], [retrievedEmails]);
+  const categories = useMemo(() => Array.from(new Set((retrievedEmails || []).map(e => e.category).filter(Boolean))) as string[], [retrievedEmails]);
   const children = useMemo(() => {
     const configured = profile?.children?.map(c => c.name) || [];
-    const detected = retrievedEmails.flatMap(e => e.childNames || []);
+    const detected = (retrievedEmails || []).flatMap(e => e.childNames || []);
     return Array.from(new Set([...configured, ...detected])).filter(Boolean) as string[];
   }, [profile?.children, retrievedEmails]);
-  const schools = useMemo(() => Array.from(new Set(retrievedEmails.map(e => e.schoolName).filter(Boolean))) as string[], [retrievedEmails]);
+  const schools = useMemo(() => Array.from(new Set((retrievedEmails || []).map(e => e.schoolName).filter(Boolean))) as string[], [retrievedEmails]);
 
   if (loading) {
     return (
@@ -2155,7 +2172,7 @@ function SchoolSyncApp() {
     );
   }
 
-  const filteredEmails = retrievedEmails.filter(email => {
+  const filteredEmails = (retrievedEmails || []).filter(email => {
     if (emailFilter.category && email.category !== emailFilter.category) return false;
     if (emailFilter.child && (!email.childNames || !email.childNames.includes(emailFilter.child))) return false;
     if (emailFilter.school && email.schoolName !== emailFilter.school) return false;
@@ -2305,11 +2322,11 @@ function SchoolSyncApp() {
               >
                 <item.icon className={`w-5 h-5 transition-transform ${activeTab === item.id ? 'scale-110' : 'group-hover:scale-110'}`} />
                 <span className="tracking-tight">{item.label}</span>
-                {item.id === 'emails' && retrievedEmails.filter(e => e.category === 'Event' || e.category === 'Urgent').length > 0 && (
+                {item.id === 'emails' && (retrievedEmails || []).filter(e => e.category === 'Event' || e.category === 'Urgent').length > 0 && (
                   <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold ${
                     activeTab === item.id ? 'bg-white/20 text-white' : 'bg-brand-100 text-brand-600'
                   }`}>
-                    {retrievedEmails.filter(e => e.category === 'Event' || e.category === 'Urgent').length}
+                    {(retrievedEmails || []).filter(e => e.category === 'Event' || e.category === 'Urgent').length}
                   </span>
                 )}
               </button>
@@ -2431,7 +2448,7 @@ function SchoolSyncApp() {
                       <div className="text-left sm:text-right">
                         <p className="text-[9px] font-bold text-brand-600 uppercase tracking-[0.2em] mb-1">Setup Progress</p>
                         <div className="flex items-baseline justify-start sm:justify-end gap-1">
-                          <span className="text-3xl md:text-4xl font-bold text-brand-600 tabular-nums">{Math.round((setupSteps.filter(s => s.completed).length / setupSteps.length) * 100)}</span>
+                          <span className="text-3xl md:text-4xl font-bold text-brand-600 tabular-nums">{Math.round(((setupSteps || []).filter(s => s.completed).length / (setupSteps || []).length) * 100)}</span>
                           <span className="text-lg md:text-xl font-bold text-brand-300">%</span>
                         </div>
                       </div>
@@ -2539,7 +2556,7 @@ function SchoolSyncApp() {
                     </div>
                     <div className="relative z-10">
                       <p className="text-[9px] md:text-[10px] font-bold text-brand-600 uppercase tracking-[0.2em]">Action Required</p>
-                      <p className="text-3xl md:text-5xl font-bold text-brand-700 tabular-nums tracking-tight">{events.filter(e => e.status === 'pending').length}</p>
+                      <p className="text-3xl md:text-5xl font-bold text-brand-700 tabular-nums tracking-tight">{(events || []).filter(e => e.status === 'pending').length}</p>
                       <p className="text-[10px] md:text-xs text-brand-600 font-medium opacity-70 mt-1">Events waiting for approval</p>
                     </div>
                   </div>
@@ -2550,7 +2567,7 @@ function SchoolSyncApp() {
                     </div>
                     <div className="relative z-10">
                       <p className="text-[9px] md:text-[10px] font-bold text-emerald-600 uppercase tracking-[0.2em]">Total Synced</p>
-                      <p className="text-3xl md:text-5xl font-bold text-emerald-700 tabular-nums tracking-tight">{events.filter(e => e.status === 'synced').length}</p>
+                      <p className="text-3xl md:text-5xl font-bold text-emerald-700 tabular-nums tracking-tight">{(events || []).filter(e => e.status === 'synced').length}</p>
                       <p className="text-[10px] md:text-xs text-emerald-600 font-medium opacity-70 mt-1">Added to Google Calendar</p>
                     </div>
                   </div>
@@ -2572,7 +2589,7 @@ function SchoolSyncApp() {
                       </div>
                       
                       <div className="space-y-3">
-                        {events
+                        {(events || [])
                           .filter(e => {
                             const d = new Date(e.start);
                             const now = new Date();
@@ -2617,7 +2634,7 @@ function SchoolSyncApp() {
                               </div>
                             </div>
                           ))}
-                        {events.filter(e => {
+                        {(events || []).filter(e => {
                           const d = new Date(e.start);
                           const now = new Date();
                           const nextWeek = new Date();
@@ -2645,7 +2662,7 @@ function SchoolSyncApp() {
                     </div>
 
                     <div className="space-y-3">
-                      {events.filter(e => e.status === 'pending').length === 0 ? (
+                      {(events || []).filter(e => e.status === 'pending').length === 0 ? (
                         <div className="bg-white p-10 rounded-3xl border border-dashed border-slate-200 text-center space-y-4 shadow-sm">
                           <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto shadow-inner">
                             <Sparkles className="w-8 h-8 text-slate-300" />
@@ -2656,7 +2673,7 @@ function SchoolSyncApp() {
                           </div>
                         </div>
                       ) : (
-                        events.filter(e => e.status === 'pending').slice(0, 4).map(event => (
+                        (events || []).filter(e => e.status === 'pending').slice(0, 4).map(event => (
                           <motion.div 
                             layout
                             key={event.id}
@@ -2835,7 +2852,7 @@ function SchoolSyncApp() {
 
                     {/* Email List */}
                     <div className="flex flex-col min-h-0" ref={inboxRef}>
-                      {filteredEmails.length === 0 ? (
+                      {(filteredEmails || []).length === 0 ? (
                         <div className="bg-white p-24 rounded-3xl border border-dashed border-slate-200 text-center space-y-8">
                           <div className="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mx-auto">
                             <Mail className="w-10 h-10 text-slate-300" />
@@ -2855,11 +2872,11 @@ function SchoolSyncApp() {
                         <div className="flex-1 min-h-[600px]">
                           <FixedSizeList
                             height={Math.max(600, inboxBounds.height - 100)}
-                            itemCount={hasMore ? filteredEmails.length + 1 : filteredEmails.length}
+                            itemCount={hasMore ? (filteredEmails || []).length + 1 : (filteredEmails || []).length}
                             itemSize={340}
                             width="100%"
                             onItemsRendered={({ visibleStopIndex }) => {
-                              if (visibleStopIndex >= filteredEmails.length - 2 && hasMore && !syncing) {
+                              if (visibleStopIndex >= (filteredEmails || []).length - 2 && hasMore && !syncing) {
                                 syncEmails(true);
                               }
                             }}
@@ -3079,7 +3096,7 @@ function SchoolSyncApp() {
                           <div className="space-y-4">
                             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Members</label>
                             <div className="space-y-2">
-                              {family?.members.map(memberId => (
+                              {family?.members && (family.members || []).map(memberId => (
                                 <div key={memberId} className="flex items-center gap-3 p-3 bg-white border border-slate-100 rounded-xl shadow-sm">
                                   <div className="w-8 h-8 bg-slate-50 rounded-lg flex items-center justify-center">
                                     <UserIcon className="w-4 h-4 text-slate-400" />
@@ -3590,7 +3607,7 @@ function SchoolSyncApp() {
                               <button 
                                 onClick={() => {
                                   const emailId = selectedEvent.sourceEmailIds![0];
-                                  const email = retrievedEmails.find(e => e.id === emailId);
+                                  const email = (retrievedEmails || []).find(e => e.id === emailId);
                                   if (email) {
                                     setSelectedEmailForModal(email);
                                     setSelectedEvent(null);
@@ -3623,7 +3640,7 @@ function SchoolSyncApp() {
                       <span className="text-[9px] bg-brand-50 text-brand-600 px-3 py-1 rounded-full font-bold uppercase tracking-widest border border-brand-100">Review Required</span>
                     </div>
                     <div className="grid grid-cols-1 gap-4">
-                      {selectedEvent.attachments.map((attachment, idx) => (
+                      {(selectedEvent.attachments || []).map((attachment, idx) => (
                         <div 
                           key={idx}
                           className={`flex flex-col p-6 bg-white border rounded-3xl transition-all ${
@@ -3850,14 +3867,14 @@ function SchoolSyncApp() {
 
               {/* Scrollable Interior */}
               <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-8 md:space-y-10 custom-scrollbar">
-                {events.filter(e => {
+                {(events || []).filter(e => {
                   const d = new Date(e.start);
                   return d.getDate() === selectedDay.day && d.getMonth() === selectedDay.month && d.getFullYear() === selectedDay.year;
                 }).length > 0 && (
                   <div className="p-6 bg-brand-50 rounded-2xl border border-brand-100 flex items-start gap-4 shadow-sm">
                     <Sparkles className="w-6 h-6 text-brand-600 flex-shrink-0 mt-1" strokeWidth={1.5} />
                     <p className="text-sm text-brand-800 leading-relaxed font-medium">
-                      I've found <span className="font-bold">{events.filter(e => {
+                      I've found <span className="font-bold">{(events || []).filter(e => {
                         const d = new Date(e.start);
                         return d.getDate() === selectedDay.day && d.getMonth() === selectedDay.month && d.getFullYear() === selectedDay.year;
                       }).length} activities</span> for this day. Here's your schedule:
@@ -3865,7 +3882,7 @@ function SchoolSyncApp() {
                   </div>
                 )}
 
-                {events.filter(e => {
+                {(events || []).filter(e => {
                   const d = new Date(e.start);
                   return d.getDate() === selectedDay.day && d.getMonth() === selectedDay.month && d.getFullYear() === selectedDay.year;
                 }).length === 0 ? (
@@ -3880,7 +3897,7 @@ function SchoolSyncApp() {
                   </div>
                 ) : (
                   <div className="space-y-6">
-                    {events
+                    {(events || [])
                       .filter(e => {
                         const d = new Date(e.start);
                         return d.getDate() === selectedDay.day && d.getMonth() === selectedDay.month && d.getFullYear() === selectedDay.year;
