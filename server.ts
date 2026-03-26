@@ -7,7 +7,7 @@ import session from "express-session";
 import cors from "cors";
 import dotenv from "dotenv";
 import jwt from "jsonwebtoken";
-import * as admin from "firebase-admin";
+import admin from "firebase-admin";
 import { getFirestore } from "firebase-admin/firestore";
 import firebaseConfig from "./firebase-applet-config.json" assert { type: "json" };
 
@@ -47,8 +47,8 @@ if (!admin.apps.length) {
 }
 
 const firestore = firebaseConfig.firestoreDatabaseId 
-  ? getFirestore(admin.app(), firebaseConfig.firestoreDatabaseId)
-  : getFirestore(admin.app());
+  ? getFirestore(firebaseConfig.firestoreDatabaseId)
+  : getFirestore();
 
 const app = express();
 const PORT = 3000;
@@ -446,7 +446,10 @@ app.post("/api/drive/upload", authenticate, async (req: AuthRequest, res) => {
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { 
+        middlewareMode: true,
+        hmr: false, // Explicitly disable HMR to avoid port 24678 conflicts
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
