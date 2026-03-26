@@ -1,0 +1,66 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: users
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string
+    //   - googleTokens: map
+    //   - schoolKeywords: list
+    //   - newsletterKeywords: list
+    //   - lastSynced: string
+    //
+    // Collection: users/{userId}/events
+    //   - uid: string (required)
+    //   - title: string (required)
+    //   - description: string
+    //   - start: string (required)
+    //   - end: string
+    //   - location: string
+    //   - sourceEmailId: string
+    //   - calendarEventId: string
+    //   - status: string
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['uid', 'email']) &&
+             data.uid is string &&
+             data.email is string &&
+             data.email.size() < 256;
+    }
+
+    function isValidSchoolEvent(data) {
+      return data.keys().hasAll(['uid', 'title', 'start']) &&
+             data.uid is string &&
+             data.title is string &&
+             data.title.size() < 500 &&
+             data.start is string;
+    }
+
+    // Rules
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUserProfile(request.resource.data);
+      allow update: if isOwner(userId) && isValidUserProfile(request.resource.data);
+
+      match /events/{eventId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidSchoolEvent(request.resource.data);
+        allow update: if isOwner(userId) && isValidSchoolEvent(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}

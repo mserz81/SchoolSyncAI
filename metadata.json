@@ -1,0 +1,5 @@
+{
+  "name": "SchoolSync AI",
+  "description": "An AI-powered school organizer that syncs Gmail, Drive, and Calendar to manage school events and activities for families.",
+  "requestFramePermissions": ["camera", "microphone", "geolocation"]
+}

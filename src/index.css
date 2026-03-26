@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  
+  /* Stabilizing Teal & Soft Blue Palette */
+  --color-brand-50: #f0f9fa;
+  --color-brand-100: #e0f2f1;
+  --color-brand-200: #b2dfdb;
+  --color-brand-300: #80cbc4;
+  --color-brand-400: #4db6ac;
+  --color-brand-500: #26a69a;
+  --color-brand-600: #00897b;
+  --color-brand-700: #00796b;
+  --color-brand-800: #00695c;
+  --color-brand-900: #004d40;
+
+  /* Calming Status Colors */
+  --color-status-amber: #fff8e1;
+  --color-status-amber-text: #856404;
+  --color-status-coral: #fff5f5;
+  --color-status-coral-text: #c53030;
+  --color-status-sage: #f0fdf4;
+  --color-status-sage-text: #166534;
+
+  /* Neutral Canvas */
+  --color-canvas-white: #ffffff;
+  --color-canvas-grey: #f8f9fa;
+}
+
+@layer base {
+  body {
+    @apply font-sans text-slate-800 antialiased bg-canvas-grey leading-relaxed;
+  }
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #e2e8f0;
+  border-radius: 12px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #cbd5e1;
+}
+
+/* Markdown Chat Styling */
+.markdown-chat {
+  @apply space-y-2;
+}
+
+.markdown-chat p {
+  @apply mb-2 last:mb-0;
+}
+
+.markdown-chat ul, .markdown-chat ol {
+  @apply ml-4 mb-2 space-y-1;
+}
+
+.markdown-chat ul {
+  @apply list-disc;
+}
+
+.markdown-chat ol {
+  @apply list-decimal;
+}
+
+.markdown-chat li {
+  @apply pl-1;
+}
+
+.markdown-chat strong {
+  @apply font-bold text-slate-900;
+}
+
+.markdown-chat h1, .markdown-chat h2, .markdown-chat h3 {
+  @apply font-bold text-slate-900 mt-3 mb-1;
+}
+
+.markdown-chat h1 { @apply text-base; }
+.markdown-chat h2 { @apply text-sm; }
+.markdown-chat h3 { @apply text-xs; }
+
+.markdown-chat code {
+  @apply bg-slate-200 px-1.5 py-0.5 rounded text-[10px] font-mono text-brand-700;
+}
+
+.markdown-chat pre {
+  @apply bg-slate-900 text-slate-100 p-3 rounded-xl my-2 overflow-x-auto text-[10px] font-mono;
+}
+
+.markdown-chat blockquote {
+  @apply border-l-4 border-brand-200 pl-3 italic text-slate-500 my-2;
+}
+
+.markdown-chat a {
+  @apply text-brand-600 underline hover:text-brand-700;
+}
+

@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user preferences and integration status.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "googleTokens": { "type": "object" },
+        "schoolKeywords": { "type": "array", "items": { "type": "string" } },
+        "newsletterKeywords": { "type": "array", "items": { "type": "string" } },
+        "lastSynced": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "SchoolEvent": {
+      "title": "School Event",
+      "description": "Extracted school events from emails.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" },
+        "location": { "type": "string" },
+        "sourceEmailId": { "type": "string" },
+        "calendarEventId": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "synced", "ignored"] }
+      },
+      "required": ["uid", "title", "start"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile and settings."
+    },
+    "/users/{userId}/events/{eventId}": {
+      "schema": "SchoolEvent",
+      "description": "Extracted events for a specific user."
+    }
+  }
+}
