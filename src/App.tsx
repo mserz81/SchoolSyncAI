@@ -1215,8 +1215,8 @@ function SchoolSyncApp() {
   // --- Google OAuth ---
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
-      // Validate origin
-      if (event.origin !== window.location.origin) {
+      const expectedOrigin = window.location.origin;
+      if (event.origin !== expectedOrigin) {
         return;
       }
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && user) {
@@ -1923,7 +1923,7 @@ function SchoolSyncApp() {
   };
 
   const discardAttachment = async (event: SchoolEvent, attachmentIndex: number) => {
-    if (!user || !event.attachments) return;
+    if (!user || !profile?.familyId || !event.attachments) return;
 
     try {
       const updatedAttachments = [...event.attachments];
@@ -1932,7 +1932,7 @@ function SchoolSyncApp() {
         status: 'discarded'
       };
 
-      await updateDoc(doc(db, 'users', user.uid, 'events', event.id), {
+      await updateDoc(doc(db, 'families', profile.familyId, 'events', event.id), {
         attachments: updatedAttachments
       });
     } catch (err) {
@@ -2095,15 +2095,21 @@ function SchoolSyncApp() {
   };
 
   const addManualEvent = async () => {
-    if (!user || !manualEventData.title || !manualEventData.start) return;
+    if (!user || !profile?.familyId || !manualEventData.title || !manualEventData.start) {
+      if (!profile?.familyId) {
+        setError("Please create or join a family group before adding events.");
+      }
+      return;
+    }
     
     try {
       const eventId = `manual_${Date.now()}`;
-      const eventRef = doc(db, 'users', user.uid, 'events', eventId);
+      const eventRef = doc(db, 'families', profile.familyId, 'events', eventId);
       await setDoc(eventRef, {
         ...manualEventData,
         id: eventId,
         uid: user.uid,
+        familyId: profile.familyId,
         status: 'pending',
         source: 'manual',
         type: 'explicit',

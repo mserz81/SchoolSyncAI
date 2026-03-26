@@ -14,12 +14,28 @@ import firebaseConfig from "./firebase-applet-config.json" assert { type: "json"
 dotenv.config();
 
 const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error('JWT_SECRET environment variable is required in production');
+if (!JWT_SECRET) {
+  throw new Error('JWT_SECRET environment variable is required');
 }
+
 const SESSION_SECRET = process.env.SESSION_SECRET;
-if (!SESSION_SECRET && process.env.NODE_ENV === 'production') {
-  throw new Error('SESSION_SECRET environment variable is required in production');
+if (!SESSION_SECRET) {
+  throw new Error('SESSION_SECRET environment variable is required');
+}
+
+const APP_URL = process.env.APP_URL;
+if (!APP_URL) {
+  throw new Error('APP_URL environment variable is required');
+}
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+if (!GOOGLE_CLIENT_ID) {
+  throw new Error('GOOGLE_CLIENT_ID environment variable is required');
+}
+
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+if (!GOOGLE_CLIENT_SECRET) {
+  throw new Error('GOOGLE_CLIENT_SECRET environment variable is required');
 }
 
 // Initialize Firebase Admin
@@ -68,7 +84,7 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
 
 // OAuth2 client setup
 const getRedirectUri = () => {
-  const baseUrl = (process.env.APP_URL || '').replace(/\/$/, '');
+  const baseUrl = APP_URL.replace(/\/$/, '');
   return `${baseUrl}/auth/callback`;
 };
 
@@ -80,18 +96,28 @@ const SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email'
 ];
 
-app.use(cors());
+const isProduction = process.env.NODE_ENV === 'production';
+
+app.use(cors({
+  origin: APP_URL,
+  credentials: true
+}));
 app.use(express.json());
 app.use(cookieParser());
+
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
+
 app.use(session({
-  secret: SESSION_SECRET || 'school-sync-secret',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  cookie: { 
-    secure: true, 
-    sameSite: 'none',
+  cookie: {
+    secure: isProduction,
+    sameSite: isProduction ? 'none' : 'lax',
     httpOnly: true,
-    maxAge: 15 * 60 * 1000 // 15 minutes for auth flow
+    maxAge: 15 * 60 * 1000
   }
 }));
 
@@ -113,13 +139,13 @@ app.get("/api/auth/url", authenticate, (req: AuthRequest, res) => {
   req.session.uid = uid; 
 
   const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
     getRedirectUri()
   );
 
   // Generate a signed state bound to the user
-  const state = jwt.sign({ uid }, JWT_SECRET || 'dev-secret', { expiresIn: '15m' });
+  const state = jwt.sign({ uid }, JWT_SECRET, { expiresIn: '15m' });
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -136,7 +162,7 @@ app.get("/auth/callback", async (req, res) => {
 
   try {
     // Verify the state JWT
-    const decoded = jwt.verify(state as string, JWT_SECRET || 'dev-secret') as { uid: string };
+    const decoded = jwt.verify(state as string, JWT_SECRET) as { uid: string };
     const uid = decoded.uid;
 
     // Verify that the user finishing the flow is the same user who initiated it
@@ -147,8 +173,8 @@ app.get("/auth/callback", async (req, res) => {
     }
 
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     const { tokens } = await oauth2Client.getToken(code as string);
@@ -156,7 +182,9 @@ app.get("/auth/callback", async (req, res) => {
     // Store tokens securely in Firestore (server-side only)
     await firestore.collection('server_tokens').doc(uid).set(tokens);
 
-    const appUrl = (process.env.APP_URL || '').replace(/\/$/, '');
+    delete req.session.uid;
+
+    const appUrl = APP_URL.replace(/\/$/, '');
 
     res.send(`
       <html>
@@ -189,8 +217,8 @@ app.post("/api/gmail/list", authenticate, async (req: AuthRequest, res) => {
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -204,7 +232,8 @@ app.post("/api/gmail/list", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Gmail list error:', error);
+    res.status(500).json({ error: 'Failed to fetch Gmail messages' });
   }
 });
 
@@ -217,8 +246,8 @@ app.post("/api/gmail/message", authenticate, async (req: AuthRequest, res) => {
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -230,7 +259,8 @@ app.post("/api/gmail/message", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Gmail message error:', error);
+    res.status(500).json({ error: 'Failed to fetch Gmail message' });
   }
 });
 
@@ -243,8 +273,8 @@ app.post("/api/calendar/create", authenticate, async (req: AuthRequest, res) => 
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -256,7 +286,8 @@ app.post("/api/calendar/create", authenticate, async (req: AuthRequest, res) => 
     });
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Calendar create error:', error);
+    res.status(500).json({ error: 'Failed to create calendar event' });
   }
 });
 
@@ -269,8 +300,8 @@ app.post("/api/calendar/list", authenticate, async (req: AuthRequest, res) => {
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -285,7 +316,8 @@ app.post("/api/calendar/list", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Calendar list error:', error);
+    res.status(500).json({ error: 'Failed to fetch calendar events' });
   }
 });
 
@@ -298,8 +330,8 @@ app.post("/api/drive/ensure-folder", authenticate, async (req: AuthRequest, res)
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -327,7 +359,8 @@ app.post("/api/drive/ensure-folder", authenticate, async (req: AuthRequest, res)
 
     res.json({ folderId: createResponse.data.id });
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Drive ensure-folder error:', error);
+    res.status(500).json({ error: 'Failed to prepare Drive folder' });
   }
 });
 
@@ -340,12 +373,19 @@ app.post("/api/drive/save-url", authenticate, async (req: AuthRequest, res) => {
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    const parsedUrl = new URL(url);
+    const allowedHosts = ['drive.google.com', 'docs.google.com'];
+
+    if (!allowedHosts.includes(parsedUrl.hostname)) {
+      return res.status(400).json({ error: 'Unsupported file host' });
+    }
 
     // Fetch the file from URL
     const fileResponse = await fetch(url);
@@ -368,7 +408,8 @@ app.post("/api/drive/save-url", authenticate, async (req: AuthRequest, res) => {
 
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Drive save-url error:', error);
+    res.status(500).json({ error: 'Failed to save file to Drive' });
   }
 });
 
@@ -381,8 +422,8 @@ app.post("/api/drive/upload", authenticate, async (req: AuthRequest, res) => {
   try {
     const tokens = await getGoogleTokens(uid);
     const oauth2Client = new google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
+      GOOGLE_CLIENT_ID,
+      GOOGLE_CLIENT_SECRET,
       getRedirectUri()
     );
     oauth2Client.setCredentials(tokens);
@@ -397,7 +438,8 @@ app.post("/api/drive/upload", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    res.status(500).json({ error: (error as Error).message });
+    console.error('Drive upload error:', error);
+    res.status(500).json({ error: 'Failed to upload file to Drive' });
   }
 });
 
@@ -426,6 +468,7 @@ app.post("/api/user/delete", authenticate, async (req: AuthRequest, res) => {
     const userDoc = await firestore.collection('users').doc(uid).get();
     const userData = userDoc.data();
     const familyId = userData?.familyId;
+    const email = userData?.email;
 
     const batch = firestore.batch();
 
@@ -449,17 +492,30 @@ app.post("/api/user/delete", authenticate, async (req: AuthRequest, res) => {
       }
     }
 
-    // 3. Delete user profile
+    // 3. Delete invitations addressed to this user
+    if (email) {
+      const invitesForEmail = await firestore.collection('invitations')
+        .where('email', '==', email)
+        .get();
+
+      invitesForEmail.forEach(inviteDoc => batch.delete(inviteDoc.ref));
+    }
+
+    // 4. Delete legacy user-scoped events if they still exist
+    const legacyEventsSnapshot = await firestore.collection('users').doc(uid).collection('events').get();
+    legacyEventsSnapshot.forEach(eventDoc => batch.delete(eventDoc.ref));
+
+    // 5. Delete user profile
     const userRef = firestore.collection('users').doc(uid);
     batch.delete(userRef);
 
-    // 4. Delete user tokens
+    // 6. Delete user tokens
     const tokensRef = firestore.collection('server_tokens').doc(uid);
     batch.delete(tokensRef);
 
     await batch.commit();
 
-    // 5. Delete Firebase Auth account
+    // 7. Delete Firebase Auth account
     await admin.auth().deleteUser(uid);
 
     console.log(`Successfully deleted all data for user: ${uid}`);
