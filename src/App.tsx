@@ -12,8 +12,10 @@ import {
   onSnapshot, 
   query, 
   orderBy,
+  where,
   deleteDoc,
-  updateDoc
+  updateDoc,
+  addDoc
 } from 'firebase/firestore';
 import { 
   Calendar, 
@@ -41,7 +43,10 @@ import {
   User as UserIcon,
   School,
   Download,
-  Trash2
+  Trash2,
+  Users,
+  UserPlus,
+  Send
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -70,17 +75,41 @@ interface Child {
   school?: string;
 }
 
+interface UserPreferences {
+  defaultCalendarView: 'month' | 'week';
+  showBriefing: boolean;
+  autoSync?: boolean;
+}
+
 interface UserProfile {
   uid: string;
   email: string;
   displayName: string;
-  googleTokens?: GoogleTokens;
+  googleConnected?: boolean;
+  familyId?: string;
   schoolKeywords: string[];
   newsletterKeywords: string[];
   schoolDomains: string[];
   lastSynced?: string;
   knowledgeBaseFolderId?: string;
   children: Child[];
+  preferences?: UserPreferences;
+}
+
+interface Family {
+  id: string;
+  name: string;
+  members: string[];
+  createdAt: string;
+}
+
+interface Invitation {
+  id: string;
+  familyId: string;
+  email: string;
+  invitedBy: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: string;
 }
 
 interface SchoolEmail {
@@ -113,6 +142,7 @@ interface ChatMessage {
 interface SchoolEvent {
   id: string;
   uid: string;
+  familyId: string;
   title: string;
   description: string;
   start: string;
@@ -121,6 +151,7 @@ interface SchoolEvent {
   sourceEmailIds: string[];
   sourceEmails?: { id: string, subject: string, from: string }[];
   calendarEventId?: string;
+  calendarEventIds?: Record<string, string>;
   calendarLink?: string;
   status: 'pending' | 'synced' | 'ignored';
   type?: 'explicit' | 'inferred';
@@ -944,6 +975,8 @@ function SchoolSyncApp() {
   const [lastApiResponse, setLastApiResponse] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
+  const [deletingData, setDeletingData] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'emails' | 'settings'>('dashboard');
   const [error, setError] = useState<string | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<SchoolEvent | null>(null);
@@ -963,6 +996,10 @@ function SchoolSyncApp() {
   }>({ category: null, child: null, school: null, search: '' });
   const [isManualModalOpen, setIsManualModalOpen] = useState(false);
   const [calendarView, setCalendarView] = useState<'month' | 'week'>('month');
+  const [family, setFamily] = useState<Family | null>(null);
+  const [pendingInvites, setPendingInvites] = useState<Invitation[]>([]);
+  const [isFamilyModalOpen, setIsFamilyModalOpen] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState('');
   const [manualEventData, setManualEventData] = useState<Partial<SchoolEvent>>({
     title: '',
     start: new Date().toISOString().split('T')[0],
@@ -971,7 +1008,8 @@ function SchoolSyncApp() {
   });
 
   const setupSteps = [
-    { id: 'auth', label: 'Connect Google', completed: !!profile?.googleTokens },
+    { id: 'auth', label: 'Connect Google', completed: !!profile?.googleConnected },
+    { id: 'family', label: 'Family Group', completed: !!profile?.familyId },
     { id: 'domains', label: 'Set School Domains', completed: (profile?.schoolDomains?.length || 0) > 0 },
     { id: 'keywords', label: 'Add Keywords', completed: (profile?.schoolKeywords?.length || 0) > 0 },
     { id: 'sync', label: 'First Sync', completed: !!profile?.lastSynced }
@@ -1012,18 +1050,21 @@ function SchoolSyncApp() {
   }, [events, calendarEvents]);
 
   const fetchCalendarEvents = async () => {
-    if (!profile?.googleTokens) return;
+    if (!user || !profile?.googleConnected) return;
     
     try {
       const now = new Date();
       const next30Days = new Date();
       next30Days.setDate(now.getDate() + 30);
       
+      const idToken = await user.getIdToken();
       const res = await fetch('/api/calendar/list', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
         body: JSON.stringify({
-          tokens: profile.googleTokens,
           timeMin: now.toISOString(),
           timeMax: next30Days.toISOString()
         })
@@ -1039,10 +1080,16 @@ function SchoolSyncApp() {
   };
 
   useEffect(() => {
-    if (profile?.googleTokens) {
+    if (profile?.googleConnected) {
       fetchCalendarEvents();
     }
-  }, [profile?.googleTokens]);
+  }, [profile?.googleConnected]);
+
+  useEffect(() => {
+    if (profile?.preferences?.defaultCalendarView) {
+      setCalendarView(profile.preferences.defaultCalendarView);
+    }
+  }, [profile?.preferences?.defaultCalendarView]);
 
   // --- Auth & Profile ---
   useEffect(() => {
@@ -1071,22 +1118,29 @@ function SchoolSyncApp() {
         const profileRef = doc(db, 'users', user.uid);
         const profileSnap = await getDoc(profileRef);
         
+        let currentProfile: UserProfile;
         if (profileSnap.exists()) {
           console.log("Profile found");
-          setProfile(profileSnap.data() as UserProfile);
+          currentProfile = profileSnap.data() as UserProfile;
+          setProfile(currentProfile);
         } else {
           console.log("Creating new profile");
-          const newProfile: UserProfile = {
+          currentProfile = {
             uid: user.uid,
             email: user.email || '',
             displayName: user.displayName || '',
             schoolKeywords: ['school', 'teacher', 'homework', 'assignment', 'exam', 'parent'],
             newsletterKeywords: ['newsletter', 'weekly update', 'bulletin'],
             schoolDomains: [],
-            children: []
+            children: [],
+            preferences: {
+              defaultCalendarView: 'month',
+              showBriefing: true,
+              autoSync: false
+            }
           };
-          await setDoc(profileRef, newProfile);
-          setProfile(newProfile);
+          await setDoc(profileRef, currentProfile);
+          setProfile(currentProfile);
         }
 
         // Listen for profile
@@ -1097,18 +1151,17 @@ function SchoolSyncApp() {
           }
         });
 
-        // Listen for events
-        console.log("Setting up events listener");
-        const eventsQuery = query(
-          collection(db, 'users', user.uid, 'events'),
-          orderBy('start', 'asc')
-        );
-        unsubscribeEvents = onSnapshot(eventsQuery, (snapshot) => {
-          const fetchedEvents = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as SchoolEvent));
-          setEvents(fetchedEvents);
-        }, (err) => {
-          console.error("Events listener error:", err);
-        });
+        // Listen for invitations if no family
+        if (!currentProfile.familyId) {
+          const invitesQuery = query(
+            collection(db, 'invitations'),
+            where('email', '==', user.email),
+            where('status', '==', 'pending')
+          );
+          onSnapshot(invitesQuery, (snapshot) => {
+            setPendingInvites(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Invitation)));
+          });
+        }
 
       } catch (err) {
         console.error("Error in initializeData:", err);
@@ -1123,19 +1176,50 @@ function SchoolSyncApp() {
 
     return () => {
       if (unsubscribeProfile) unsubscribeProfile();
-      if (unsubscribeEvents) unsubscribeEvents();
     };
   }, [user]);
+
+  // --- Family & Events Listener ---
+  useEffect(() => {
+    if (!profile?.familyId) {
+      setEvents([]);
+      setFamily(null);
+      return;
+    }
+
+    console.log("Setting up family and events listener for:", profile.familyId);
+    const familyRef = doc(db, 'families', profile.familyId);
+    const unsubscribeFamily = onSnapshot(familyRef, (snap) => {
+      if (snap.exists()) {
+        setFamily({ id: snap.id, ...snap.data() } as Family);
+      }
+    });
+
+    const eventsQuery = query(
+      collection(db, 'families', profile.familyId, 'events'),
+      orderBy('start', 'asc')
+    );
+    const unsubscribeEvents = onSnapshot(eventsQuery, (snapshot) => {
+      const fetchedEvents = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as SchoolEvent));
+      setEvents(fetchedEvents);
+    }, (err) => {
+      console.error("Events listener error:", err);
+    });
+
+    return () => {
+      unsubscribeFamily();
+      unsubscribeEvents();
+    };
+  }, [profile?.familyId]);
 
   // --- Google OAuth ---
   useEffect(() => {
     const handleMessage = async (event: MessageEvent) => {
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && user) {
-        console.log("Received Google tokens, updating profile");
-        const tokens = event.data.tokens;
+        console.log("Received Google auth success, updating profile");
         const profileRef = doc(db, 'users', user.uid);
-        await updateDoc(profileRef, { googleTokens: tokens });
-        setProfile(prev => prev ? { ...prev, googleTokens: tokens } : null);
+        await updateDoc(profileRef, { googleConnected: true });
+        setProfile(prev => prev ? { ...prev, googleConnected: true } : null);
       }
     };
     window.addEventListener('message', handleMessage);
@@ -1143,13 +1227,80 @@ function SchoolSyncApp() {
   }, [user]);
 
   const connectGoogle = async () => {
+    if (!user) return;
     try {
-      const response = await fetch('/api/auth/url');
+      const response = await fetch(`/api/auth/url?uid=${user.uid}`);
       const { url } = await response.json();
       window.open(url, 'google_oauth', 'width=600,height=700');
     } catch (err) {
       console.error("Failed to connect to Google:", err);
       setError("Failed to connect to Google");
+    }
+  };
+
+  const createFamily = async (name: string) => {
+    if (!user || !profile) return;
+    try {
+      const familyRef = doc(collection(db, 'families'));
+      const newFamily: Family = {
+        id: familyRef.id,
+        name: name,
+        members: [user.uid],
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(familyRef, newFamily);
+      await updateDoc(doc(db, 'users', user.uid), { familyId: familyRef.id });
+      setIsFamilyModalOpen(false);
+    } catch (err) {
+      console.error("Error creating family:", err);
+      setError("Failed to create family group.");
+    }
+  };
+
+  const sendInvitation = async (email: string) => {
+    if (!user || !profile?.familyId) return;
+    try {
+      const inviteRef = doc(collection(db, 'invitations'));
+      const newInvite: Invitation = {
+        id: inviteRef.id,
+        familyId: profile.familyId,
+        email: email.toLowerCase().trim(),
+        invitedBy: user.displayName || user.email || 'A family member',
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(inviteRef, newInvite);
+      setInviteEmail('');
+    } catch (err) {
+      console.error("Error sending invitation:", err);
+      setError("Failed to send invitation.");
+    }
+  };
+
+  const acceptInvitation = async (invitation: Invitation) => {
+    if (!user || !profile) return;
+    try {
+      await updateDoc(doc(db, 'invitations', invitation.id), { status: 'accepted' });
+      const familyRef = doc(db, 'families', invitation.familyId);
+      const familySnap = await getDoc(familyRef);
+      if (familySnap.exists()) {
+        const currentMembers = familySnap.data().members || [];
+        if (!currentMembers.includes(user.uid)) {
+          await updateDoc(familyRef, { members: [...currentMembers, user.uid] });
+        }
+      }
+      await updateDoc(doc(db, 'users', user.uid), { familyId: invitation.familyId });
+    } catch (err) {
+      console.error("Error accepting invitation:", err);
+      setError("Failed to join family group.");
+    }
+  };
+
+  const declineInvitation = async (invitationId: string) => {
+    try {
+      await updateDoc(doc(db, 'invitations', invitationId), { status: 'declined' });
+    } catch (err) {
+      console.error("Error declining invitation:", err);
     }
   };
 
@@ -1221,7 +1372,7 @@ function SchoolSyncApp() {
 
   const syncEmails = async (isLoadMore = false) => {
     if (!user) return;
-    if (!profile?.googleTokens) {
+    if (!profile?.googleConnected) {
       setError("Please connect your Google account in Settings first.");
       return;
     }
@@ -1251,11 +1402,14 @@ function SchoolSyncApp() {
       
       console.log("Syncing with Gmail Query:", queryStr, isLoadMore ? `(PageToken: ${nextPageToken})` : '(Initial)');
 
+      const idToken = await user.getIdToken();
       const listResponse = await fetch('/api/gmail/list', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
         body: JSON.stringify({ 
-          tokens: profile?.googleTokens, 
           query: queryStr,
           pageToken: isLoadMore ? nextPageToken : null,
           maxResults: 20
@@ -1296,8 +1450,11 @@ function SchoolSyncApp() {
         listData.messages.map(async (m: any) => {
           const res = await fetch('/api/gmail/message', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tokens: profile.googleTokens, messageId: m.id })
+            headers: { 
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${idToken}`
+            },
+            body: JSON.stringify({ messageId: m.id })
           });
           return res.json();
         })
@@ -1417,7 +1574,9 @@ function SchoolSyncApp() {
 
         if (relatedEvent) {
           // Link to existing event
-          const eventRef = doc(db, 'users', user.uid, 'events', relatedEvent.id);
+          const eventRef = profile?.familyId 
+            ? doc(db, 'families', profile.familyId, 'events', relatedEvent.id)
+            : doc(db, 'users', user.uid, 'events', relatedEvent.id);
           const currentSourceEmailIds = relatedEvent.sourceEmailIds || [];
           const currentSourceEmails = relatedEvent.sourceEmails || [];
           const currentAttachments = relatedEvent.attachments || [];
@@ -1456,7 +1615,9 @@ function SchoolSyncApp() {
         } else {
           // Create new event
           const eventId = `event_${event.sourceEmailId}`;
-          const eventRef = doc(db, 'users', user.uid, 'events', eventId);
+          const eventRef = profile?.familyId 
+            ? doc(db, 'families', profile.familyId, 'events', eventId)
+            : doc(db, 'users', user.uid, 'events', eventId);
           const existing = await getDoc(eventRef);
           
           if (!existing.exists()) {
@@ -1473,6 +1634,7 @@ function SchoolSyncApp() {
               sourceEmails: emailMeta ? [emailMeta] : [],
               attachments,
               uid: user.uid,
+              familyId: profile?.familyId || '',
               status: 'pending',
               source: 'auto'
             };
@@ -1594,7 +1756,9 @@ function SchoolSyncApp() {
 
           if (relatedEvent) {
             // Link to existing event
-            const eventRef = doc(db, 'users', user.uid, 'events', relatedEvent.id);
+            const eventRef = profile?.familyId 
+              ? doc(db, 'families', profile.familyId, 'events', relatedEvent.id)
+              : doc(db, 'users', user.uid, 'events', relatedEvent.id);
             const currentSourceEmailIds = relatedEvent.sourceEmailIds || [];
             const currentSourceEmails = relatedEvent.sourceEmails || [];
             const currentAttachments = relatedEvent.attachments || [];
@@ -1628,7 +1792,9 @@ function SchoolSyncApp() {
           } else {
             // Create new event
             const eventId = `event_manual_${Date.now()}_${event.sourceEmailId}`;
-            const eventRef = doc(db, 'users', user.uid, 'events', eventId);
+            const eventRef = profile?.familyId 
+              ? doc(db, 'families', profile.familyId, 'events', eventId)
+              : doc(db, 'users', user.uid, 'events', eventId);
             
             // Default attachments to pending
             const attachments = (event.attachments || []).map((a: any) => ({
@@ -1644,6 +1810,7 @@ function SchoolSyncApp() {
               sourceEmails: [emailMetadata],
               attachments,
               uid: user.uid,
+              familyId: profile?.familyId || '',
               status: 'pending',
               source: 'manual'
             };
@@ -1663,15 +1830,18 @@ function SchoolSyncApp() {
   };
 
   const ensureKnowledgeBaseFolder = async () => {
-    if (!user || !profile?.googleTokens) return null;
+    if (!user || !profile?.googleConnected) return null;
     if (profile.knowledgeBaseFolderId) return profile.knowledgeBaseFolderId;
 
     try {
+      const idToken = await user.getIdToken();
       const res = await fetch('/api/drive/ensure-folder', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
         body: JSON.stringify({ 
-          tokens: profile.googleTokens, 
           folderName: 'School Knowledge Base' 
         })
       });
@@ -1687,7 +1857,7 @@ function SchoolSyncApp() {
   };
 
   const saveAttachmentToDrive = async (event: SchoolEvent, attachmentIndex: number) => {
-    if (!user || !profile?.googleTokens || !event.attachments) return;
+    if (!user || !profile?.googleConnected || !event.attachments) return;
     
     const attachment = event.attachments[attachmentIndex];
     if (attachment.status === 'saved') return;
@@ -1696,11 +1866,14 @@ function SchoolSyncApp() {
       setSyncing(true);
       const folderId = await ensureKnowledgeBaseFolder();
       
+      const idToken = await user.getIdToken();
       const res = await fetch('/api/drive/save-url', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
         body: JSON.stringify({
-          tokens: profile.googleTokens,
           url: attachment.url,
           fileName: attachment.name,
           folderId: folderId
@@ -1716,7 +1889,11 @@ function SchoolSyncApp() {
           driveFileId: data.id
         };
 
-        await updateDoc(doc(db, 'users', user.uid, 'events', event.id), {
+        const eventRef = profile.familyId 
+          ? doc(db, 'families', profile.familyId, 'events', event.id)
+          : doc(db, 'users', user.uid, 'events', event.id);
+
+        await updateDoc(eventRef, {
           attachments: updatedAttachments
         });
       }
@@ -1747,7 +1924,7 @@ function SchoolSyncApp() {
   };
 
   const syncToCalendar = async (event: SchoolEvent) => {
-    if (!profile?.googleTokens) {
+    if (!user || !profile?.googleConnected) {
       setError("Please connect your Google account in Settings first.");
       return;
     }
@@ -1773,16 +1950,25 @@ function SchoolSyncApp() {
         location: event.location
       };
 
+      const idToken = await user.getIdToken();
       const response = await fetch('/api/calendar/create', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tokens: profile.googleTokens, event: calendarEvent })
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${idToken}`
+        },
+        body: JSON.stringify({ event: calendarEvent })
       });
       
       const data = await response.json();
       if (data.id && user) {
-        await updateDoc(doc(db, 'users', user.uid, 'events', event.id), {
-          calendarEventId: data.id,
+        const eventRef = profile.familyId 
+          ? doc(db, 'families', profile.familyId, 'events', event.id)
+          : doc(db, 'users', user.uid, 'events', event.id);
+          
+        const currentCalendarEventIds = event.calendarEventIds || {};
+        await updateDoc(eventRef, {
+          calendarEventIds: { ...currentCalendarEventIds, [user.uid]: data.id },
           calendarLink: data.htmlLink,
           status: 'synced'
         });
@@ -1794,7 +1980,10 @@ function SchoolSyncApp() {
 
   const ignoreEvent = async (eventId: string) => {
     if (!user) return;
-    await updateDoc(doc(db, 'users', user.uid, 'events', eventId), { status: 'ignored' });
+    const eventRef = profile?.familyId 
+      ? doc(db, 'families', profile.familyId, 'events', eventId)
+      : doc(db, 'users', user.uid, 'events', eventId);
+    await updateDoc(eventRef, { status: 'ignored' });
   };
 
   const addKeyword = async (keyword: string, type: 'school' | 'newsletter') => {
@@ -1851,6 +2040,41 @@ function SchoolSyncApp() {
     const newList = currentList.filter(c => c.id !== childId);
     await updateDoc(doc(db, 'users', user.uid), { children: newList });
     setProfile({ ...profile, children: newList });
+  };
+
+  const deleteUserData = async () => {
+    if (!user) return;
+    setDeletingData(true);
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch('/api/user/delete', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to delete user data');
+      }
+      
+      // Sign out after deletion
+      await signOut(auth);
+      window.location.reload();
+    } catch (error) {
+      console.error('Error deleting user data:', error);
+      alert('Failed to delete your data. Please try again.');
+    } finally {
+      setDeletingData(false);
+      setShowDeleteConfirm(false);
+    }
+  };
+
+  const updatePreferences = async (newPrefs: Partial<UserPreferences>) => {
+    if (!user || !profile) return;
+    const updatedPrefs = { ...(profile.preferences || { defaultCalendarView: 'month', showBriefing: true, autoSync: false }), ...newPrefs } as UserPreferences;
+    await updateDoc(doc(db, 'users', user.uid), { preferences: updatedPrefs });
+    setProfile({ ...profile, preferences: updatedPrefs });
   };
 
   const addManualEvent = async () => {
@@ -2131,7 +2355,7 @@ function SchoolSyncApp() {
           </div>
 
           <div className="flex items-center gap-6">
-            {profile?.googleTokens ? (
+            {profile?.googleConnected ? (
               <button 
                 onClick={() => syncEmails()}
                 disabled={syncing}
@@ -2191,7 +2415,9 @@ function SchoolSyncApp() {
                 className="space-y-10 pb-12"
               >
                 {/* AI Assistant Briefing */}
-                <AssistantBriefing events={events} profile={profile} conflicts={conflicts} />
+                {(!profile?.preferences || profile.preferences.showBriefing) && (
+                  <AssistantBriefing events={events} profile={profile} conflicts={conflicts} />
+                )}
 
                 {/* Welcome & Setup Progress */}
                 {!setupCompleted && (
@@ -2232,7 +2458,7 @@ function SchoolSyncApp() {
                       ))}
                     </div>
 
-                    {!profile?.googleTokens && (
+                    {!profile?.googleConnected && (
                       <button 
                         onClick={connectGoogle}
                         className="w-full py-6 bg-brand-600 text-white rounded-3xl font-bold hover:bg-brand-700 transition-all shadow-2xl shadow-brand-100 flex items-center justify-center gap-4 text-lg relative z-10 group"
@@ -2549,9 +2775,6 @@ function SchoolSyncApp() {
                     <div className="space-y-1">
                       <h2 className="text-4xl font-bold text-slate-900 tracking-tight">School Inbox</h2>
                       <p className="text-slate-500 text-lg">AI-powered discovery of events from your school emails.</p>
-                      <p className="text-xs text-slate-400 font-medium mt-2">
-                        Note: We only scan emails from your <span className="text-brand-600 font-bold">Domains</span>. <span className="text-brand-600 font-bold">Keywords</span> act as an additional filter if provided.
-                      </p>
                     </div>
                   <div className="flex items-center gap-3">
                     <button 
@@ -2565,131 +2788,53 @@ function SchoolSyncApp() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-                  {/* Filters Sidebar */}
-                  <div className="space-y-6">
-                    <div className="bg-white p-8 rounded-3xl border border-slate-100 shadow-sm space-y-6">
-                      <h4 className="font-bold text-slate-900 flex items-center gap-2">
-                        <Filter className="w-5 h-5 text-brand-600" />
-                        Smart Filters
-                      </h4>
+                <div className="max-w-4xl mx-auto w-full">
+                    {/* Search Bar */}
+                    <div className="mb-8">
+                      <div className="relative">
+                        <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
+                        <input 
+                          type="text"
+                          placeholder="Search your school inbox..."
+                          value={emailFilter.search}
+                          onChange={(e) => setEmailFilter(f => ({ ...f, search: e.target.value }))}
+                          className="w-full pl-16 pr-8 py-5 bg-white border border-slate-100 rounded-2xl shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all text-slate-900 font-medium"
+                        />
+                      </div>
                       
-                      <div className="space-y-6">
-                        {categories.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">Category</p>
-                            <div className="flex flex-wrap gap-2">
-                              <button 
-                                onClick={() => setEmailFilter(f => ({ ...f, category: null }))}
-                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.category ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                              >
-                                All
-                              </button>
-                              {categories.map(c => (
-                                <button 
-                                  key={c}
-                                  onClick={() => setEmailFilter(f => ({ ...f, category: c }))}
-                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.category === c ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                                >
-                                  {c}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {children.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">Child</p>
-                            <div className="flex flex-wrap gap-2">
-                              <button 
-                                onClick={() => setEmailFilter(f => ({ ...f, child: null }))}
-                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.child ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                              >
-                                All
-                              </button>
-                              {children.map(c => (
-                                <button 
-                                  key={c}
-                                  onClick={() => setEmailFilter(f => ({ ...f, child: c }))}
-                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.child === c ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                                >
-                                  {c}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
-                        {schools.length > 0 && (
-                          <div>
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">School</p>
-                            <div className="flex flex-wrap gap-2">
-                              <button 
-                                onClick={() => setEmailFilter(f => ({ ...f, school: null }))}
-                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.school ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                              >
-                                All
-                              </button>
-                              {schools.map(s => (
-                                <button 
-                                  key={s}
-                                  onClick={() => setEmailFilter(f => ({ ...f, school: s }))}
-                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.school === s ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
-                                >
-                                  {s}
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="pt-6 border-t border-slate-50 space-y-6">
-                        <div>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">Active Domains</p>
-                          <div className="flex flex-wrap gap-2">
-                            {profile?.schoolDomains?.map(d => (
-                              <span key={d} className="px-3 py-1.5 bg-brand-50 text-brand-700 rounded-xl text-[10px] font-bold border border-brand-100">{d}</span>
-                            ))}
-                          </div>
+                      {/* Active Filters Summary */}
+                      {(emailFilter.category || emailFilter.child || emailFilter.school) && (
+                        <div className="flex flex-wrap gap-2 mt-4">
+                          {emailFilter.category && (
+                            <span className="px-3 py-1 bg-brand-50 text-brand-700 rounded-full text-[10px] font-bold uppercase tracking-widest border border-brand-100 flex items-center gap-2">
+                              Category: {emailFilter.category}
+                              <button onClick={() => setEmailFilter(f => ({ ...f, category: null }))}><X className="w-3 h-3" /></button>
+                            </span>
+                          )}
+                          {emailFilter.child && (
+                            <span className="px-3 py-1 bg-brand-50 text-brand-700 rounded-full text-[10px] font-bold uppercase tracking-widest border border-brand-100 flex items-center gap-2">
+                              Child: {emailFilter.child}
+                              <button onClick={() => setEmailFilter(f => ({ ...f, child: null }))}><X className="w-3 h-3" /></button>
+                            </span>
+                          )}
+                          {emailFilter.school && (
+                            <span className="px-3 py-1 bg-brand-50 text-brand-700 rounded-full text-[10px] font-bold uppercase tracking-widest border border-brand-100 flex items-center gap-2">
+                              School: {emailFilter.school}
+                              <button onClick={() => setEmailFilter(f => ({ ...f, school: null }))}><X className="w-3 h-3" /></button>
+                            </span>
+                          )}
+                          <button 
+                            onClick={() => setEmailFilter({ search: '', category: null, child: null, school: null })}
+                            className="text-[10px] font-bold text-slate-400 hover:text-brand-600 uppercase tracking-widest ml-2"
+                          >
+                            Clear All
+                          </button>
                         </div>
-                      </div>
-                      <button 
-                        onClick={() => setActiveTab('settings')}
-                        className="w-full py-3 text-xs font-bold text-brand-600 border border-brand-100 rounded-xl hover:bg-brand-50 transition-colors"
-                      >
-                        Edit Filters
-                      </button>
+                      )}
                     </div>
-
-                    <div className="bg-amber-50 p-8 rounded-3xl border border-amber-100 space-y-4">
-                      <div className="flex items-center gap-2 text-amber-700">
-                        <Sparkles className="w-6 h-6" />
-                        <h4 className="font-bold">AI Discovery</h4>
-                      </div>
-                      <p className="text-xs text-amber-800 leading-relaxed font-medium opacity-80">
-                        We use Gemini AI to scan the content of these emails for dates, times, and event details automatically.
-                      </p>
-                    </div>
-                  </div>
 
                     {/* Email List */}
-                    <div className="lg:col-span-3 flex flex-col min-h-0" ref={inboxRef}>
-                      {/* Search Bar */}
-                      <div className="mb-6">
-                        <div className="relative">
-                          <Search className="absolute left-6 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
-                          <input 
-                            type="text"
-                            placeholder="Search your school inbox..."
-                            value={emailFilter.search}
-                            onChange={(e) => setEmailFilter(f => ({ ...f, search: e.target.value }))}
-                            className="w-full pl-16 pr-8 py-5 bg-white border border-slate-100 rounded-2xl shadow-sm focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all text-slate-900 font-medium"
-                          />
-                        </div>
-                      </div>
-
+                    <div className="flex flex-col min-h-0" ref={inboxRef}>
                       {filteredEmails.length === 0 ? (
                         <div className="bg-white p-24 rounded-3xl border border-dashed border-slate-200 text-center space-y-8">
                           <div className="w-24 h-24 bg-slate-50 rounded-full flex items-center justify-center mx-auto">
@@ -2741,121 +2886,406 @@ function SchoolSyncApp() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, x: -20 }}
-                className="max-w-4xl space-y-8 md:space-y-12 pb-12"
+                className="max-w-6xl mx-auto space-y-8 md:space-y-12 pb-12"
               >
                 <div className="space-y-2">
                   <h2 className="text-3xl md:text-4xl font-bold text-slate-900 tracking-tight">Configuration</h2>
                   <p className="text-slate-500 text-base md:text-lg">Fine-tune how SchoolSync identifies and processes your data.</p>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
-                  {/* Connection Card */}
-                  <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
-                    <div className="flex items-center gap-4 md:gap-5">
-                      <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
-                        <RefreshCw className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                  {/* Left Column: Account & Family */}
+                  <div className="space-y-8">
+                    {/* Sync Status Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <RefreshCw className={`w-6 h-6 md:w-8 md:h-8 text-brand-600 ${syncing ? 'animate-spin' : ''}`} />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Sync Status</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Last updated: {profile?.lastSynced ? new Date(profile.lastSynced).toLocaleString() : 'Never'}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="text-xl md:text-2xl font-bold text-slate-900">Connection</h3>
-                        <p className="text-xs md:text-sm text-slate-500 font-medium">Google Workspace Link</p>
+                      <button 
+                        onClick={() => syncEmails()}
+                        disabled={syncing || !profile?.googleConnected}
+                        className="w-full py-4 bg-brand-600 text-white rounded-2xl font-bold hover:bg-brand-700 transition-all shadow-lg shadow-brand-100/30 disabled:opacity-50"
+                      >
+                        {syncing ? 'Syncing...' : 'Sync Now'}
+                      </button>
+                    </div>
+
+                    {/* Connection Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <RefreshCw className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Connection</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Google Workspace Link</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-6">
+                        <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <Mail className="w-6 h-6 text-red-500" />
+                              <span className="font-bold text-slate-900">Gmail & Calendar</span>
+                            </div>
+                            {profile?.googleConnected ? (
+                              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-[0.2em] bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-100">Active</span>
+                            ) : (
+                              <span className="text-[10px] font-bold text-red-600 uppercase tracking-[0.2em] bg-red-50 px-3 py-1.5 rounded-lg border border-red-100">Disconnected</span>
+                            )}
+                          </div>
+                          <button 
+                            onClick={connectGoogle}
+                            className="w-full py-4 bg-white border border-slate-200 text-brand-600 rounded-2xl text-sm font-bold hover:bg-brand-50 transition-all shadow-sm"
+                          >
+                            {profile?.googleConnected ? 'Reconnect Account' : 'Connect Google Account'}
+                          </button>
+                        </div>
+
+                        <div className="space-y-3">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Redirect URI</label>
+                          <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                            <code className="text-[10px] text-brand-600 font-mono truncate flex-1">{window.location.origin}/auth/callback</code>
+                            <button 
+                              onClick={() => navigator.clipboard.writeText(`${window.location.origin}/auth/callback`)}
+                              className="p-2 hover:bg-white rounded-xl transition-all shadow-sm"
+                            >
+                              <ExternalLink className="w-4 h-4 text-slate-400" />
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="space-y-6">
-                      <div className="p-6 bg-slate-50 rounded-2xl border border-slate-100 space-y-4">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-3">
-                            <Mail className="w-6 h-6 text-red-500" />
-                            <span className="font-bold text-slate-900">Gmail & Calendar</span>
-                          </div>
-                          {profile?.googleTokens ? (
-                            <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-[0.2em] bg-emerald-50 px-3 py-1.5 rounded-lg border border-emerald-100">Active</span>
-                          ) : (
-                            <span className="text-[10px] font-bold text-red-600 uppercase tracking-[0.2em] bg-red-50 px-3 py-1.5 rounded-lg border border-red-100">Disconnected</span>
-                          )}
+                    {/* App Preferences Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <Settings className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
                         </div>
-                        <button 
-                          onClick={connectGoogle}
-                          className="w-full py-4 bg-white border border-slate-200 text-brand-600 rounded-2xl text-sm font-bold hover:bg-brand-50 transition-all shadow-sm"
-                        >
-                          {profile?.googleTokens ? 'Reconnect Account' : 'Connect Google Account'}
-                        </button>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">App Preferences</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Customize your experience</p>
+                        </div>
                       </div>
 
-                      <div className="space-y-3">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Redirect URI</label>
-                        <div className="flex items-center gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                          <code className="text-[10px] text-brand-600 font-mono truncate flex-1">{window.location.origin}/auth/callback</code>
+                      <div className="space-y-6">
+                        <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div>
+                            <p className="text-sm font-bold text-slate-900">Default Calendar View</p>
+                            <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">Month or Week view</p>
+                          </div>
+                          <div className="flex bg-white p-1 rounded-xl border border-slate-200">
+                            <button 
+                              onClick={() => updatePreferences({ defaultCalendarView: 'month' })}
+                              className={`px-4 py-2 rounded-lg text-[10px] font-bold transition-all ${profile?.preferences?.defaultCalendarView === 'month' ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                            >
+                              Month
+                            </button>
+                            <button 
+                              onClick={() => updatePreferences({ defaultCalendarView: 'week' })}
+                              className={`px-4 py-2 rounded-lg text-[10px] font-bold transition-all ${profile?.preferences?.defaultCalendarView === 'week' ? 'bg-brand-600 text-white shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                            >
+                              Week
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                          <div>
+                            <p className="text-sm font-bold text-slate-900">AI Briefing</p>
+                            <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">Show morning summary</p>
+                          </div>
                           <button 
-                            onClick={() => navigator.clipboard.writeText(`${window.location.origin}/auth/callback`)}
-                            className="p-2 hover:bg-white rounded-xl transition-all shadow-sm"
+                            onClick={() => updatePreferences({ showBriefing: !profile?.preferences?.showBriefing })}
+                            className={`w-12 h-6 rounded-full transition-all relative ${profile?.preferences?.showBriefing ? 'bg-brand-600' : 'bg-slate-300'}`}
                           >
-                            <ExternalLink className="w-4 h-4 text-slate-400" />
+                            <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${profile?.preferences?.showBriefing ? 'left-7' : 'left-1'}`} />
                           </button>
                         </div>
                       </div>
                     </div>
+
+                    {/* Family Group Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <Users className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Family Group</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Collaborate with Coparents</p>
+                        </div>
+                      </div>
+
+                      {!profile?.familyId ? (
+                        <div className="space-y-6">
+                          {pendingInvites.length > 0 ? (
+                            <div className="space-y-4">
+                              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Pending Invitations</p>
+                              {pendingInvites.map(invite => (
+                                <div key={invite.id} className="p-4 bg-brand-50 border border-brand-100 rounded-2xl flex items-center justify-between">
+                                  <div className="min-w-0">
+                                    <p className="text-xs font-bold text-slate-900 truncate">Invited by {invite.invitedBy}</p>
+                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-0.5">To join their family</p>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <button 
+                                      onClick={() => acceptInvitation(invite)}
+                                      className="p-2 bg-emerald-500 text-white rounded-xl hover:bg-emerald-600 transition-all"
+                                    >
+                                      <Check className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                      onClick={() => declineInvitation(invite.id)}
+                                      className="p-2 bg-rose-500 text-white rounded-xl hover:bg-rose-600 transition-all"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-center py-6 space-y-4">
+                              <p className="text-sm text-slate-500 leading-relaxed">
+                                Join forces with your partner or family members to stay in sync with school events.
+                              </p>
+                              <button 
+                                onClick={() => setIsFamilyModalOpen(true)}
+                                className="w-full py-4 bg-brand-600 text-white rounded-2xl font-bold hover:bg-brand-700 transition-all shadow-lg shadow-brand-100/30"
+                              >
+                                Create Family Group
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="space-y-8">
+                          <div className="space-y-4">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Family Name</label>
+                            <div className="p-4 bg-slate-50 border border-slate-100 rounded-2xl">
+                              <p className="text-sm font-bold text-slate-900">{family?.name || 'My Family'}</p>
+                            </div>
+                          </div>
+
+                          <div className="space-y-4">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Members</label>
+                            <div className="space-y-2">
+                              {family?.members.map(memberId => (
+                                <div key={memberId} className="flex items-center gap-3 p-3 bg-white border border-slate-100 rounded-xl shadow-sm">
+                                  <div className="w-8 h-8 bg-slate-50 rounded-lg flex items-center justify-center">
+                                    <UserIcon className="w-4 h-4 text-slate-400" />
+                                  </div>
+                                  <span className="text-xs font-bold text-slate-700">{memberId === user.uid ? 'You' : 'Family Member'}</span>
+                                  {memberId === user.uid && <span className="ml-auto text-[8px] font-bold text-brand-600 uppercase tracking-widest bg-brand-50 px-2 py-0.5 rounded-full border border-brand-100">Owner</span>}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="space-y-4">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Invite Member</label>
+                            <div className="flex gap-2">
+                              <input 
+                                type="email"
+                                placeholder="Email address..."
+                                value={inviteEmail}
+                                onChange={(e) => setInviteEmail(e.target.value)}
+                                className="flex-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-xs focus:outline-none focus:border-brand-500 transition-all"
+                              />
+                              <button 
+                                onClick={() => sendInvitation(inviteEmail)}
+                                disabled={!inviteEmail.includes('@')}
+                                className="p-3 bg-brand-600 text-white rounded-2xl hover:bg-brand-700 transition-all disabled:opacity-50"
+                              >
+                                <Send className="w-5 h-5" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
-                  {/* Filters Card */}
-                  <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
-                    <div className="flex items-center gap-4 md:gap-5">
-                      <div className="w-12 h-12 md:w-16 md:h-16 bg-amber-50 rounded-2xl flex items-center justify-center">
-                        <Filter className="w-6 h-6 md:w-8 md:h-8 text-amber-600" />
-                      </div>
-                      <div>
-                        <h3 className="text-xl md:text-2xl font-bold text-slate-900">Smart Filters</h3>
-                        <p className="text-xs md:text-sm text-slate-500 font-medium">Discovery Keywords</p>
-                      </div>
-                    </div>
-
-                    <div className="p-4 md:p-6 bg-amber-50 rounded-2xl border border-amber-100 flex items-start gap-3 md:gap-4">
-                      <Sparkles className="w-5 h-5 md:w-6 md:h-6 text-amber-600 flex-shrink-0 mt-1" />
-                      <p className="text-xs md:text-sm text-amber-800 leading-relaxed">
-                        SchoolSync requires at least one <span className="font-bold">Domain</span> to scan for emails. <span className="font-bold">Keywords</span> are optional and will further filter results if provided.
-                      </p>
-                    </div>
-
-                    <div className="space-y-8">
-                      <div className="space-y-4">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School Domains</label>
-                        <div className="flex flex-wrap gap-2">
-                          {profile?.schoolDomains?.map(d => (
-                            <span key={d} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700">
-                              {d}
-                              <button onClick={() => removeDomain(d)} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
-                            </span>
-                          ))}
-                          <form onSubmit={(e) => {
-                            e.preventDefault();
-                            const i = e.currentTarget.elements.namedItem('d') as HTMLInputElement;
-                            addDomain(i.value); i.value = '';
-                          }}>
-                            <input name="d" placeholder="Add domain..." className="w-32 px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                          </form>
+                  {/* Right Column: Discovery & Filters */}
+                  <div className="space-y-8">
+                    {/* Discovery Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-amber-50 rounded-2xl flex items-center justify-center">
+                          <Sparkles className="w-6 h-6 md:w-8 md:h-8 text-amber-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Discovery</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Email Scanning Rules</p>
                         </div>
                       </div>
 
-                      <div className="space-y-4">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Keywords</label>
-                        <div className="flex flex-wrap gap-2">
-                          {[...(profile?.schoolKeywords || []), ...(profile?.newsletterKeywords || [])].map(k => (
-                            <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
-                              {k}
-                              <button onClick={() => removeKeyword(k, 'school')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
-                            </span>
-                          ))}
-                          <form onSubmit={(e) => {
-                            e.preventDefault();
-                            const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
-                            addKeyword(i.value, 'school'); i.value = '';
-                          }}>
-                            <input name="k" placeholder="Add keyword..." className="w-32 px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                          </form>
+                      <div className="space-y-8">
+                        <div className="space-y-4">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School Domains</label>
+                          <div className="flex flex-wrap gap-2">
+                            {profile?.schoolDomains?.map(d => (
+                              <span key={d} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700">
+                                {d}
+                                <button onClick={() => removeDomain(d)} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                              </span>
+                            ))}
+                            <form onSubmit={(e) => {
+                              e.preventDefault();
+                              const i = e.currentTarget.elements.namedItem('d') as HTMLInputElement;
+                              addDomain(i.value); i.value = '';
+                            }}>
+                              <input name="d" placeholder="Add domain..." className="w-32 px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                            </form>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School Keywords</label>
+                          <div className="flex flex-wrap gap-2">
+                            {profile?.schoolKeywords?.map(k => (
+                              <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
+                                {k}
+                                <button onClick={() => removeKeyword(k, 'school')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                              </span>
+                            ))}
+                            <form onSubmit={(e) => {
+                              e.preventDefault();
+                              const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
+                              addKeyword(i.value, 'school'); i.value = '';
+                            }}>
+                              <input name="k" placeholder="Add school keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                            </form>
+                          </div>
+                        </div>
+
+                        <div className="space-y-4">
+                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Newsletter Keywords</label>
+                          <div className="flex flex-wrap gap-2">
+                            {profile?.newsletterKeywords?.map(k => (
+                              <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
+                                {k}
+                                <button onClick={() => removeKeyword(k, 'newsletter')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                              </span>
+                            ))}
+                            <form onSubmit={(e) => {
+                              e.preventDefault();
+                              const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
+                              addKeyword(i.value, 'newsletter'); i.value = '';
+                            }}>
+                              <input name="k" placeholder="Add newsletter keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                            </form>
+                          </div>
                         </div>
                       </div>
-                      <div className="space-y-4">
-                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Children</label>
+                    </div>
+
+                    {/* Inbox Filters Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <Filter className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Inbox Filters</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">View Preferences</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-8">
+                        {categories.length > 0 && (
+                          <div className="space-y-4">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Category</p>
+                            <div className="flex flex-wrap gap-2">
+                              <button 
+                                onClick={() => setEmailFilter(f => ({ ...f, category: null }))}
+                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.category ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                              >
+                                All
+                              </button>
+                              {categories.map(c => (
+                                <button 
+                                  key={c}
+                                  onClick={() => setEmailFilter(f => ({ ...f, category: c }))}
+                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.category === c ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                                >
+                                  {c}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {children.length > 0 && (
+                          <div className="space-y-4">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Child</p>
+                            <div className="flex flex-wrap gap-2">
+                              <button 
+                                onClick={() => setEmailFilter(f => ({ ...f, child: null }))}
+                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.child ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                              >
+                                All
+                              </button>
+                              {children.map(c => (
+                                <button 
+                                  key={c}
+                                  onClick={() => setEmailFilter(f => ({ ...f, child: c }))}
+                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.child === c ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                                >
+                                  {c}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {schools.length > 0 && (
+                          <div className="space-y-4">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School</p>
+                            <div className="flex flex-wrap gap-2">
+                              <button 
+                                onClick={() => setEmailFilter(f => ({ ...f, school: null }))}
+                                className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${!emailFilter.school ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                              >
+                                All
+                              </button>
+                              {schools.map(s => (
+                                <button 
+                                  key={s}
+                                  onClick={() => setEmailFilter(f => ({ ...f, school: s }))}
+                                  className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-all ${emailFilter.school === s ? 'bg-brand-600 text-white border-brand-600' : 'bg-slate-50 text-slate-600 border-slate-100 hover:bg-slate-100'}`}
+                                >
+                                  {s}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Children Card */}
+                    <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
+                      <div className="flex items-center gap-4 md:gap-5">
+                        <div className="w-12 h-12 md:w-16 md:h-16 bg-brand-50 rounded-2xl flex items-center justify-center">
+                          <UserIcon className="w-6 h-6 md:w-8 md:h-8 text-brand-600" />
+                        </div>
+                        <div>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Children</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Manage Profiles</p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-6">
                         <div className="grid grid-cols-1 gap-3">
                           {profile?.children?.map(child => (
                             <div key={child.id} className="p-4 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-between group">
@@ -2905,6 +3335,32 @@ function SchoolSyncApp() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Danger Zone */}
+                  <div className="bg-rose-50 p-6 md:p-10 rounded-3xl border border-rose-100 shadow-sm space-y-6 md:space-y-8">
+                    <div className="flex items-center gap-4 md:gap-5">
+                      <div className="w-12 h-12 md:w-16 md:h-16 bg-rose-100 rounded-2xl flex items-center justify-center">
+                        <AlertTriangle className="w-6 h-6 md:w-8 md:h-8 text-rose-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl md:text-2xl font-bold text-rose-900">Danger Zone</h3>
+                        <p className="text-xs md:text-sm text-rose-500 font-medium">Irreversible actions</p>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-4">
+                      <p className="text-sm text-rose-700 leading-relaxed">
+                        Deleting your data will permanently remove your profile, all synced events, and disconnect your Google account. This action cannot be undone.
+                      </p>
+                      <button 
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="w-full py-4 bg-rose-600 text-white rounded-2xl font-bold hover:bg-rose-700 transition-all shadow-lg shadow-rose-100/30 flex items-center justify-center gap-3"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                        Delete My Data
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
                 {/* Advanced / Debug */}
@@ -2942,6 +3398,62 @@ function SchoolSyncApp() {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteConfirm && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !deletingData && setShowDeleteConfirm(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative bg-white w-full max-w-md rounded-[32px] shadow-2xl overflow-hidden border border-slate-100 p-8 md:p-10 space-y-8"
+            >
+              <div className="w-20 h-20 bg-rose-50 rounded-3xl flex items-center justify-center mx-auto">
+                <AlertTriangle className="w-10 h-10 text-rose-600" />
+              </div>
+              
+              <div className="text-center space-y-3">
+                <h3 className="text-2xl font-bold text-slate-900">Delete all data?</h3>
+                <p className="text-slate-500 text-sm leading-relaxed">
+                  This will permanently delete your account, profile, and all synced school events. You will be signed out immediately.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <button 
+                  onClick={deleteUserData}
+                  disabled={deletingData}
+                  className="w-full py-4 bg-rose-600 text-white rounded-2xl font-bold hover:bg-rose-700 transition-all shadow-lg shadow-rose-100/30 disabled:opacity-50 flex items-center justify-center gap-3"
+                >
+                  {deletingData ? (
+                    <>
+                      <RefreshCw className="w-5 h-5 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    'Yes, Delete Everything'
+                  )}
+                </button>
+                <button 
+                  onClick={() => setShowDeleteConfirm(false)}
+                  disabled={deletingData}
+                  className="w-full py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Event Details Modal */}
       <AnimatePresence>
@@ -3213,6 +3725,75 @@ function SchoolSyncApp() {
                 >
                   Close
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Family Modal */}
+      <AnimatePresence>
+        {isFamilyModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsFamilyModalOpen(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 40 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 40 }}
+              className="relative w-full max-w-md bg-white rounded-[32px] shadow-2xl overflow-hidden"
+            >
+              <div className="p-8 space-y-6">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 bg-brand-50 rounded-2xl flex items-center justify-center">
+                      <Users className="w-6 h-6 text-brand-600" />
+                    </div>
+                    <h3 className="text-2xl font-bold text-slate-900 tracking-tight">Create Family</h3>
+                  </div>
+                  <button onClick={() => setIsFamilyModalOpen(false)} className="p-2 hover:bg-slate-50 rounded-xl">
+                    <X className="w-6 h-6 text-slate-300" />
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <p className="text-sm text-slate-500 leading-relaxed">
+                    Give your family group a name to get started.
+                  </p>
+                  <input 
+                    type="text"
+                    placeholder="e.g. The Smith Family"
+                    className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl text-slate-900 font-bold focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-all"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        createFamily(e.currentTarget.value);
+                      }
+                    }}
+                  />
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setIsFamilyModalOpen(false)}
+                    className="flex-1 py-4 bg-slate-50 text-slate-500 rounded-2xl font-bold uppercase tracking-widest hover:bg-slate-100 transition-all"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={() => {
+                      const input = document.querySelector('input[placeholder="e.g. The Smith Family"]') as HTMLInputElement;
+                      if (input.value) createFamily(input.value);
+                    }}
+                    className="flex-1 py-4 bg-brand-600 text-white rounded-2xl font-bold uppercase tracking-widest hover:bg-brand-700 transition-all shadow-lg shadow-brand-100/30"
+                  >
+                    Create
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>

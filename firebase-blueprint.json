@@ -9,11 +9,38 @@
         "email": { "type": "string" },
         "displayName": { "type": "string" },
         "googleTokens": { "type": "object" },
+        "familyId": { "type": "string" },
         "schoolKeywords": { "type": "array", "items": { "type": "string" } },
         "newsletterKeywords": { "type": "array", "items": { "type": "string" } },
         "lastSynced": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email"]
+    },
+    "Family": {
+      "title": "Family Group",
+      "description": "Shared data for a family group.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "members": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "members"]
+    },
+    "Invitation": {
+      "title": "Family Invitation",
+      "description": "Invitation to join a family group.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "familyId": { "type": "string" },
+        "email": { "type": "string" },
+        "invitedBy": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "familyId", "email"]
     },
     "SchoolEvent": {
       "title": "School Event",
@@ -27,10 +54,11 @@
         "end": { "type": "string", "format": "date-time" },
         "location": { "type": "string" },
         "sourceEmailId": { "type": "string" },
-        "calendarEventId": { "type": "string" },
-        "status": { "type": "string", "enum": ["pending", "synced", "ignored"] }
+        "calendarEventIds": { "type": "object", "description": "Map of userId to calendarEventId" },
+        "status": { "type": "string", "enum": ["pending", "synced", "ignored"] },
+        "familyId": { "type": "string" }
       },
-      "required": ["uid", "title", "start"]
+      "required": ["uid", "title", "start", "familyId"]
     }
   },
   "firestore": {
@@ -38,9 +66,17 @@
       "schema": "UserProfile",
       "description": "User profile and settings."
     },
-    "/users/{userId}/events/{eventId}": {
+    "/families/{familyId}": {
+      "schema": "Family",
+      "description": "Family group data."
+    },
+    "/families/{familyId}/events/{eventId}": {
       "schema": "SchoolEvent",
-      "description": "Extracted events for a specific user."
+      "description": "Extracted events for a family."
+    },
+    "/invitations/{invitationId}": {
+      "schema": "Invitation",
+      "description": "Invitations to join families."
     }
   }
 }

@@ -8,12 +8,19 @@ service cloud.firestore {
     //   - uid: string (required)
     //   - email: string (required)
     //   - displayName: string
-    //   - googleTokens: map
+    //   - googleConnected: boolean
+    //   - familyId: string
     //   - schoolKeywords: list
     //   - newsletterKeywords: list
     //   - lastSynced: string
     //
-    // Collection: users/{userId}/events
+    // Collection: families
+    //   - id: string (required)
+    //   - name: string
+    //   - members: list (required)
+    //   - createdAt: string
+    //
+    // Collection: families/{familyId}/events
     //   - uid: string (required)
     //   - title: string (required)
     //   - description: string
@@ -21,8 +28,17 @@ service cloud.firestore {
     //   - end: string
     //   - location: string
     //   - sourceEmailId: string
-    //   - calendarEventId: string
+    //   - calendarEventIds: map
     //   - status: string
+    //   - familyId: string (required)
+    //
+    // Collection: invitations
+    //   - id: string (required)
+    //   - familyId: string (required)
+    //   - email: string (required)
+    //   - invitedBy: string
+    //   - status: string
+    //   - createdAt: string
     // ===============================================================
 
     // Helper Functions
@@ -34,6 +50,12 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function isFamilyMember(familyId) {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/families/$(familyId)) &&
+             get(/databases/$(database)/documents/families/$(familyId)).data.members.hasAny([request.auth.uid]);
+    }
+
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'email']) &&
              data.uid is string &&
@@ -41,12 +63,26 @@ service cloud.firestore {
              data.email.size() < 256;
     }
 
+    function isValidFamily(data) {
+      return data.keys().hasAll(['id', 'members']) &&
+             data.id is string &&
+             data.members is list;
+    }
+
     function isValidSchoolEvent(data) {
-      return data.keys().hasAll(['uid', 'title', 'start']) &&
+      return data.keys().hasAll(['uid', 'title', 'start', 'familyId']) &&
              data.uid is string &&
              data.title is string &&
              data.title.size() < 500 &&
-             data.start is string;
+             data.start is string &&
+             data.familyId is string;
+    }
+
+    function isValidInvitation(data) {
+      return data.keys().hasAll(['id', 'familyId', 'email']) &&
+             data.id is string &&
+             data.familyId is string &&
+             data.email is string;
     }
 
     // Rules
@@ -54,13 +90,30 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create: if isOwner(userId) && isValidUserProfile(request.resource.data);
       allow update: if isOwner(userId) && isValidUserProfile(request.resource.data);
+    }
+
+    match /server_tokens/{userId} {
+      allow read, write: if false; // Only server-side access
+    }
+
+    match /families/{familyId} {
+      allow read: if isFamilyMember(familyId);
+      allow create: if isAuthenticated() && request.resource.data.members.hasAny([request.auth.uid]) && isValidFamily(request.resource.data);
+      allow update: if isFamilyMember(familyId) && isValidFamily(request.resource.data);
 
       match /events/{eventId} {
-        allow read: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidSchoolEvent(request.resource.data);
-        allow update: if isOwner(userId) && isValidSchoolEvent(request.resource.data);
-        allow delete: if isOwner(userId);
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && isValidSchoolEvent(request.resource.data);
+        allow update: if isFamilyMember(familyId) && isValidSchoolEvent(request.resource.data);
+        allow delete: if isFamilyMember(familyId);
       }
+    }
+
+    match /invitations/{invitationId} {
+      allow read: if isAuthenticated() && (request.auth.token.email == resource.data.email || isFamilyMember(resource.data.familyId));
+      allow create: if isAuthenticated() && isFamilyMember(request.resource.data.familyId) && isValidInvitation(request.resource.data);
+      allow update: if isAuthenticated() && (request.auth.token.email == resource.data.email || isFamilyMember(resource.data.familyId)) && isValidInvitation(request.resource.data);
+      allow delete: if isAuthenticated() && isFamilyMember(resource.data.familyId);
     }
   }
 }
