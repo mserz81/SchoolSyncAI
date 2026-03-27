@@ -15,7 +15,8 @@ import {
   where,
   deleteDoc,
   updateDoc,
-  addDoc
+  addDoc,
+  deleteField
 } from 'firebase/firestore';
 import { 
   Calendar, 
@@ -46,7 +47,8 @@ import {
   Trash2,
   Users,
   UserPlus,
-  Send
+  Send,
+  HelpCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -72,7 +74,15 @@ interface Child {
   id: string;
   name: string;
   grade?: string;
-  school?: string;
+  schoolId?: string;
+}
+
+interface SchoolConfig {
+  id: string;
+  name: string;
+  domains: string[];
+  emailAddresses: string[];
+  familyId: string;
 }
 
 interface UserPreferences {
@@ -89,7 +99,6 @@ interface UserProfile {
   familyId?: string;
   schoolKeywords: string[];
   newsletterKeywords: string[];
-  schoolDomains: string[];
   lastSynced?: string;
   knowledgeBaseFolderId?: string;
   children: Child[];
@@ -574,8 +583,14 @@ function ChatAssistant({ events, profile, retrievedEmails, calendarEvents, confl
 
   const [ai] = useState(() => {
     try {
-      return new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+      const key = process.env.GEMINI_API_KEY;
+      if (!key) {
+        console.warn('GEMINI_API_KEY is not set. AI features will be disabled.');
+        return null;
+      }
+      return new GoogleGenAI({ apiKey: key });
     } catch (e) {
+      console.error('Failed to initialize Gemini AI:', e);
       return null;
     }
   });
@@ -593,7 +608,6 @@ function ChatAssistant({ events, profile, retrievedEmails, calendarEvents, confl
         User Profile: ${JSON.stringify({
           displayName: profile?.displayName,
           schoolKeywords: profile?.schoolKeywords,
-          schoolDomains: profile?.schoolDomains,
           children: profile?.children
         })}
         
@@ -971,6 +985,7 @@ function SchoolSyncApp() {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [events, setEvents] = useState<SchoolEvent[]>([]);
+  const [schools, setSchools] = useState<SchoolConfig[]>([]);
   const [retrievedEmails, setRetrievedEmails] = useState<SchoolEmail[]>([]);
   const [lastApiResponse, setLastApiResponse] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -1010,7 +1025,7 @@ function SchoolSyncApp() {
   const setupSteps = [
     { id: 'auth', label: 'Connect Google', completed: !!profile?.googleConnected },
     { id: 'family', label: 'Family Group', completed: !!profile?.familyId },
-    { id: 'domains', label: 'Set School Domains', completed: (profile?.schoolDomains?.length || 0) > 0 },
+    { id: 'schools', label: 'Configure Schools', completed: (schools?.length || 0) > 0 },
     { id: 'keywords', label: 'Add Keywords', completed: (profile?.schoolKeywords?.length || 0) > 0 },
     { id: 'sync', label: 'First Sync', completed: !!profile?.lastSynced }
   ];
@@ -1071,6 +1086,10 @@ function SchoolSyncApp() {
       });
       
       const data = await res.json();
+      if (data.error) {
+        setError(data.details || data.error);
+        return;
+      }
       if (data.items) {
         setCalendarEvents(data.items);
       }
@@ -1131,7 +1150,6 @@ function SchoolSyncApp() {
             displayName: user.displayName || '',
             schoolKeywords: ['school', 'teacher', 'homework', 'assignment', 'exam', 'parent'],
             newsletterKeywords: ['newsletter', 'weekly update', 'bulletin'],
-            schoolDomains: [],
             children: [],
             preferences: {
               defaultCalendarView: 'month',
@@ -1206,9 +1224,23 @@ function SchoolSyncApp() {
       console.error("Events listener error:", err);
     });
 
+    const schoolsQuery = query(
+      collection(db, 'families', profile.familyId, 'schools'),
+      orderBy('name', 'asc')
+    );
+    console.log("Setting up schools listener for family:", profile.familyId);
+    const unsubscribeSchools = onSnapshot(schoolsQuery, (snapshot) => {
+      console.log("Schools snapshot received, count:", snapshot.docs.length);
+      const fetchedSchools = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as SchoolConfig));
+      setSchools(fetchedSchools);
+    }, (err) => {
+      console.error("Schools listener error:", err);
+    });
+
     return () => {
       unsubscribeFamily();
       unsubscribeEvents();
+      unsubscribeSchools();
     };
   }, [profile?.familyId]);
 
@@ -1244,6 +1276,30 @@ function SchoolSyncApp() {
     } catch (err) {
       console.error("Failed to connect to Google:", err);
       setError("Failed to connect to Google");
+    }
+  };
+
+  const forceResetConnection = async () => {
+    if (!user) return;
+    if (!confirm("This will completely remove your Google connection and stored tokens. You will need to reconnect your account. Continue?")) return;
+    
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch('/api/auth/clear', { 
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${idToken}`
+        }
+      });
+      if (response.ok) {
+        setProfile(prev => prev ? { ...prev, googleConnected: false } : null);
+        alert("Connection reset successfully. You can now reconnect your account.");
+      } else {
+        throw new Error("Failed to reset connection");
+      }
+    } catch (err) {
+      console.error('Failed to reset connection:', err);
+      setError('Failed to reset connection. Please try again.');
     }
   };
 
@@ -1402,19 +1458,24 @@ function SchoolSyncApp() {
 
     try {
       const keywordParts = [...(profile?.schoolKeywords || []), ...(profile?.newsletterKeywords || [])].filter(k => k.trim() !== '');
-      const domainParts = (profile?.schoolDomains || []).filter(d => d.trim() !== '');
       
-      if (domainParts.length === 0) {
-        setError("Please add your school's email domain in Settings to retrieve emails.");
+      const allDomains = schools.flatMap(s => s.domains || []).filter(d => d.trim() !== '');
+      const allEmails = schools.flatMap(s => s.emailAddresses || []).filter(e => e.trim() !== '');
+      
+      if (allDomains.length === 0 && allEmails.length === 0) {
+        setError("Please configure your schools in Settings to retrieve emails.");
         setSyncing(false);
         return;
       }
 
-      const domainQuery = `(${domainParts.map(d => `from:${d}`).join(' OR ')})`;
-      let queryStr = domainQuery;
+      const domainQueries = allDomains.map(d => `from:${d}`);
+      const emailQueries = allEmails.map(e => `from:${e}`);
+      const combinedFromQuery = `(${[...domainQueries, ...emailQueries].join(' OR ')})`;
+      
+      let queryStr = combinedFromQuery;
       
       if (keywordParts.length > 0) {
-        queryStr = `${domainQuery} (${keywordParts.join(' OR ')})`;
+        queryStr = `${combinedFromQuery} (${keywordParts.join(' OR ')})`;
       }
       
       console.log("Syncing with Gmail Query:", queryStr, isLoadMore ? `(PageToken: ${nextPageToken})` : '(Initial)');
@@ -1436,13 +1497,7 @@ function SchoolSyncApp() {
       setLastApiResponse(listData);
 
       if (listData.error) {
-        if (typeof listData.error === 'string' && listData.error.includes('Gmail API has not been used')) {
-          setError("Gmail API is disabled. Please enable it here: https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=768653570909");
-        } else if (listData.error.message?.includes('Gmail API has not been used')) {
-          setError("Gmail API is disabled. Please enable it here: https://console.developers.google.com/apis/api/gmail.googleapis.com/overview?project=768653570909");
-        } else {
-          setError(listData.error.message || "Failed to fetch emails.");
-        }
+        setError(listData.details || listData.error.message || listData.error || "Failed to fetch emails.");
         setSyncing(false);
         return;
       }
@@ -1493,10 +1548,16 @@ function SchoolSyncApp() {
         return `ID: ${m.id}\nSubject: ${m.subject}\nFrom: ${m.from}\nContent: ${m.body.slice(0, 3000)}`; 
       }).join('\n\n---\n\n');
 
-      const childrenInfo = (profile?.children || []).map(c => `${c.name} (Grade: ${c.grade || 'N/A'}, School: ${c.school || 'N/A'})`).join(', ');
+      const childrenInfo = (profile?.children || []).map(c => {
+        const school = schools.find(s => s.id === c.schoolId);
+        return `${c.name} (Grade: ${c.grade || 'N/A'}, School: ${school?.name || 'N/A'})`;
+      }).join(', ');
       
+      const schoolInfo = schools.map(s => `${s.name} (Domains: ${s.domains.join(', ')}, Emails: ${s.emailAddresses.join(', ')})`).join('; ');
+
       const prompt = `
         Analyze the following school-related emails for these children: ${childrenInfo || 'No specific children configured, please detect names from context.'}
+        Configured Schools: ${schoolInfo}
         
         1. EXTRACT EVENTS: Extract any upcoming events, deadlines, activities, or general school notices.
            Include both "true" events (explicitly stated dates/times) and "general activities" or "spirit days" (e.g., "Animal Dress Up Day", "Wear Yellow", "Library Day", "No School").
@@ -1681,10 +1742,16 @@ function SchoolSyncApp() {
     setError(null);
 
     try {
-      const childrenInfo = (profile?.children || []).map(c => `${c.name} (Grade: ${c.grade || 'N/A'}, School: ${c.school || 'N/A'})`).join(', ');
+      const childrenInfo = (profile?.children || []).map(c => {
+        const school = schools.find(s => s.id === c.schoolId);
+        return `${c.name} (Grade: ${c.grade || 'N/A'}, School: ${school?.name || 'N/A'})`;
+      }).join(', ');
+      
+      const schoolInfo = schools.map(s => `${s.name} (Domains: ${s.domains.join(', ')}, Emails: ${s.emailAddresses.join(', ')})`).join('; ');
       
       const prompt = `
         Analyze this school email for these children: ${childrenInfo || 'No specific children configured, please detect names from context.'}
+        Configured Schools: ${schoolInfo}
         
         1. EXTRACT EVENTS: Extract any upcoming events, deadlines, activities, or general school notices.
            Include both "true" events (explicitly stated dates/times) and "general activities" or "spirit days" (e.g., "Animal Dress Up Day", "Wear Yellow", "Library Day", "No School").
@@ -2021,30 +2088,83 @@ function SchoolSyncApp() {
     setProfile({ ...profile, [field]: newList });
   };
 
-  const addDomain = async (domain: string) => {
-    if (!user || !profile || !domain.trim()) return;
-    const currentList = profile.schoolDomains || [];
-    const newList = [...currentList, domain.trim().toLowerCase()];
-    await updateDoc(doc(db, 'users', user.uid), { schoolDomains: newList });
-    setProfile({ ...profile, schoolDomains: newList });
+  const addSchool = async (name: string) => {
+    console.log("addSchool called with:", name);
+    if (!user || !profile || !profile.familyId || !name.trim()) {
+      console.warn("addSchool aborted: missing user, profile, familyId, or name", { user: !!user, profile: !!profile, familyId: profile?.familyId, name });
+      if (!profile?.familyId) {
+        setError("Please create or join a family group before adding schools.");
+      }
+      return;
+    }
+    try {
+      const schoolId = `school_${Date.now()}`;
+      const newSchool: SchoolConfig = {
+        id: schoolId,
+        name: name.trim(),
+        domains: [],
+        emailAddresses: [],
+        familyId: profile.familyId
+      };
+      console.log("Saving school to Firestore:", newSchool);
+      await setDoc(doc(db, 'families', profile.familyId, 'schools', schoolId), newSchool);
+      console.log("School saved successfully");
+    } catch (err) {
+      console.error("Error adding school:", err);
+      setError("Failed to add school. Please try again.");
+    }
   };
 
-  const removeDomain = async (domain: string) => {
-    if (!user || !profile) return;
-    const currentList = profile.schoolDomains || [];
-    const newList = currentList.filter(d => d !== domain);
-    await updateDoc(doc(db, 'users', user.uid), { schoolDomains: newList });
-    setProfile({ ...profile, schoolDomains: newList });
+  const removeSchool = async (schoolId: string) => {
+    if (!user || !profile || !profile.familyId) return;
+    await deleteDoc(doc(db, 'families', profile.familyId, 'schools', schoolId));
   };
 
-  const addChild = async (name: string, grade?: string, school?: string) => {
+  const updateSchool = async (schoolId: string, updates: Partial<SchoolConfig>) => {
+    if (!user || !profile || !profile.familyId) return;
+    await updateDoc(doc(db, 'families', profile.familyId, 'schools', schoolId), updates);
+  };
+
+  const addSchoolDomain = async (schoolId: string, domain: string) => {
+    if (!user || !profile || !profile.familyId || !domain.trim()) return;
+    const school = schools.find(s => s.id === schoolId);
+    if (!school) return;
+    const newList = [...(school.domains || []), domain.trim().toLowerCase()];
+    await updateSchool(schoolId, { domains: newList });
+  };
+
+  const removeSchoolDomain = async (schoolId: string, domain: string) => {
+    if (!user || !profile || !profile.familyId) return;
+    const school = schools.find(s => s.id === schoolId);
+    if (!school) return;
+    const newList = (school.domains || []).filter(d => d !== domain);
+    await updateSchool(schoolId, { domains: newList });
+  };
+
+  const addSchoolEmail = async (schoolId: string, email: string) => {
+    if (!user || !profile || !profile.familyId || !email.trim()) return;
+    const school = schools.find(s => s.id === schoolId);
+    if (!school) return;
+    const newList = [...(school.emailAddresses || []), email.trim().toLowerCase()];
+    await updateSchool(schoolId, { emailAddresses: newList });
+  };
+
+  const removeSchoolEmail = async (schoolId: string, email: string) => {
+    if (!user || !profile || !profile.familyId) return;
+    const school = schools.find(s => s.id === schoolId);
+    if (!school) return;
+    const newList = (school.emailAddresses || []).filter(e => e !== email);
+    await updateSchool(schoolId, { emailAddresses: newList });
+  };
+
+  const addChild = async (name: string, grade?: string, schoolId?: string) => {
     if (!user || !profile || !name.trim()) return;
     const currentList = profile.children || [];
     const newChild: Child = {
       id: `child_${Date.now()}`,
       name: name.trim(),
       grade: grade?.trim(),
-      school: school?.trim()
+      schoolId: schoolId
     };
     const newList = [...currentList, newChild];
     await updateDoc(doc(db, 'users', user.uid), { children: newList });
@@ -2133,7 +2253,11 @@ function SchoolSyncApp() {
     const detected = (retrievedEmails || []).flatMap(e => e.childNames || []);
     return Array.from(new Set([...configured, ...detected])).filter(Boolean) as string[];
   }, [profile?.children, retrievedEmails]);
-  const schools = useMemo(() => Array.from(new Set((retrievedEmails || []).map(e => e.schoolName).filter(Boolean))) as string[], [retrievedEmails]);
+  const detectedSchools = useMemo(() => Array.from(new Set((retrievedEmails || []).map(e => e.schoolName).filter(Boolean))) as string[], [retrievedEmails]);
+  const allAvailableSchools = useMemo(() => {
+    const configured = schools.map(s => s.name);
+    return Array.from(new Set([...configured, ...detectedSchools])).filter(Boolean) as string[];
+  }, [schools, detectedSchools]);
 
   if (loading) {
     return (
@@ -2404,27 +2528,72 @@ function SchoolSyncApp() {
             <motion.div 
               initial={{ opacity: 0, y: -10 }}
               animate={{ opacity: 1, y: 0 }}
-              className="mb-6 p-4 bg-red-50 border border-red-100 rounded-xl flex items-center gap-3 text-red-700"
+              className={`mb-6 p-4 rounded-xl flex flex-col gap-3 ${error.includes('Project Deleted') ? 'bg-amber-50 border border-amber-200 text-amber-800' : 'bg-red-50 border border-red-100 text-red-700'}`}
             >
-              <AlertCircle className="w-5 h-5 flex-shrink-0" />
-              <p className="text-sm font-medium">
-                {error.includes('http') ? (
-                  <>
-                    {error.split(' ').map((word, i) => (
-                      word.startsWith('http') ? (
-                        <a key={i} href={word} target="_blank" rel="noopener noreferrer" className="underline font-bold hover:text-red-900 mr-1">
-                          {word}
-                        </a>
-                      ) : (
-                        <span key={i} className="mr-1">{word}</span>
-                      )
-                    ))}
-                  </>
-                ) : error}
-              </p>
-              <button onClick={() => setError(null)} className="ml-auto">
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-bold">
+                    {error.includes('Project Deleted') ? 'Critical: Google Cloud Project Deleted' : 'Error'}
+                  </p>
+                  <p className="text-xs mt-1 leading-relaxed">
+                    {error.includes('http') ? (
+                      <>
+                        {error.split(' ').map((word, i) => (
+                          word.startsWith('http') ? (
+                            <a key={i} href={word} target="_blank" rel="noopener noreferrer" className="underline font-bold hover:text-current mr-1">
+                              {word}
+                            </a>
+                          ) : (
+                            <span key={i} className="mr-1">{word}</span>
+                          )
+                        ))}
+                      </>
+                    ) : error}
+                  </p>
+                </div>
+                <button onClick={() => setError(null)} className="ml-auto p-1 hover:bg-black/5 rounded-lg transition-colors">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {error.includes('Project Deleted') && (
+                <div className="mt-4 p-4 bg-white/50 rounded-xl border border-amber-200/50 space-y-4">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-amber-600">Action Required: Restore Google Connection</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">1. Create New Project</p>
+                      <a 
+                        href="https://console.cloud.google.com/" 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between p-3 bg-white border border-amber-200 rounded-xl text-[10px] font-bold text-amber-700 hover:bg-amber-50 transition-all"
+                      >
+                        Open Google Cloud Console
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-[10px] font-bold text-slate-500 uppercase">2. Copy Redirect URI</p>
+                      <button 
+                        onClick={() => {
+                          navigator.clipboard.writeText(`${window.location.origin}/auth/callback`);
+                          alert("Redirect URI copied!");
+                        }}
+                        className="w-full flex items-center justify-between p-3 bg-white border border-amber-200 rounded-xl text-[10px] font-bold text-amber-700 hover:bg-amber-50 transition-all"
+                      >
+                        Copy Redirect URI
+                        <Paperclip className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="p-3 bg-amber-100/50 rounded-xl">
+                    <p className="text-[10px] leading-relaxed text-amber-800">
+                      <strong>Next:</strong> Enable Gmail/Calendar/Drive APIs, create new OAuth credentials, and update <strong>GOOGLE_CLIENT_ID</strong> and <strong>GOOGLE_CLIENT_SECRET</strong> in your app's Secrets panel.
+                    </p>
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -2970,6 +3139,15 @@ function SchoolSyncApp() {
                           >
                             {profile?.googleConnected ? 'Reconnect Account' : 'Connect Google Account'}
                           </button>
+
+                          {profile?.googleConnected && (
+                            <button 
+                              onClick={forceResetConnection}
+                              className="w-full py-2 text-[10px] font-bold text-red-500 uppercase tracking-widest hover:text-red-700 transition-all"
+                            >
+                              Force Reset Connection
+                            </button>
+                          )}
                         </div>
 
                         <div className="space-y-3">
@@ -3140,73 +3318,169 @@ function SchoolSyncApp() {
 
                   {/* Right Column: Discovery & Filters */}
                   <div className="space-y-8">
-                    {/* Discovery Card */}
+                    {/* Schools Card */}
                     <div className="bg-white p-6 md:p-10 rounded-3xl border border-slate-100 shadow-sm space-y-6 md:space-y-8">
                       <div className="flex items-center gap-4 md:gap-5">
                         <div className="w-12 h-12 md:w-16 md:h-16 bg-amber-50 rounded-2xl flex items-center justify-center">
-                          <Sparkles className="w-6 h-6 md:w-8 md:h-8 text-amber-600" />
+                          <School className="w-6 h-6 md:w-8 md:h-8 text-amber-600" />
                         </div>
                         <div>
-                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Discovery</h3>
-                          <p className="text-xs md:text-sm text-slate-500 font-medium">Email Scanning Rules</p>
+                          <h3 className="text-xl md:text-2xl font-bold text-slate-900">Schools</h3>
+                          <p className="text-xs md:text-sm text-slate-500 font-medium">Configure School Sources</p>
                         </div>
                       </div>
 
                       <div className="space-y-8">
-                        <div className="space-y-4">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School Domains</label>
-                          <div className="flex flex-wrap gap-2">
-                            {profile?.schoolDomains?.map(d => (
-                              <span key={d} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700">
-                                {d}
-                                <button onClick={() => removeDomain(d)} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
-                              </span>
-                            ))}
-                            <form onSubmit={(e) => {
-                              e.preventDefault();
-                              const i = e.currentTarget.elements.namedItem('d') as HTMLInputElement;
-                              addDomain(i.value); i.value = '';
-                            }}>
-                              <input name="d" placeholder="Add domain..." className="w-32 px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                            </form>
-                          </div>
+                        {/* Add School Form */}
+                        <form onSubmit={(e) => {
+                          e.preventDefault();
+                          const i = e.currentTarget.elements.namedItem('schoolName') as HTMLInputElement;
+                          addSchool(i.value); i.value = '';
+                        }} className="flex gap-2">
+                          <input name="schoolName" placeholder="School Name (e.g. St. Mary's Primary)" className="flex-1 px-4 py-3 bg-slate-50 border border-slate-100 rounded-2xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                          <button type="submit" className="px-6 py-3 bg-brand-600 text-white rounded-2xl font-bold hover:bg-brand-700 transition-all shadow-lg shadow-brand-100/30 text-xs">
+                            Add School
+                          </button>
+                        </form>
+
+                        {/* List Schools */}
+                        <div className="space-y-6">
+                          {schools.length === 0 && (
+                            <div className="text-center py-10 border-2 border-dashed border-slate-100 rounded-3xl">
+                              <p className="text-xs text-slate-400 font-medium">No schools configured yet.</p>
+                              {!profile?.familyId && <p className="text-[10px] text-brand-600 mt-2 font-bold uppercase tracking-widest">Create a family group first</p>}
+                            </div>
+                          )}
+                          {schools.map(school => (
+                            <div key={school.id} className="p-6 bg-slate-50 border border-slate-100 rounded-3xl space-y-6 relative group">
+                              <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center border border-slate-100 shadow-sm font-bold text-brand-600">
+                                    {school.name.charAt(0)}
+                                  </div>
+                                  <input 
+                                    defaultValue={school.name}
+                                    onBlur={(e) => {
+                                      if (e.target.value && e.target.value !== school.name) {
+                                        updateSchool(school.id, { name: e.target.value });
+                                      }
+                                    }}
+                                    className="font-bold text-slate-900 bg-transparent border-none focus:ring-0 p-0 w-full"
+                                  />
+                                </div>
+                                <button 
+                                  onClick={() => removeSchool(school.id)}
+                                  className="p-2 text-slate-400 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+
+                              <div className="grid grid-cols-1 gap-8">
+                                {/* Domains */}
+                                <div className="space-y-4">
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Email Domains</label>
+                                    <span className="text-[10px] text-slate-400 font-medium">e.g. school.edu</span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {(school.domains || []).map(d => (
+                                      <span key={d} className="px-3 py-1.5 bg-white border border-slate-100 rounded-xl text-[10px] font-bold flex items-center gap-2 text-slate-700 shadow-sm">
+                                        {d}
+                                        <button onClick={() => removeSchoolDomain(school.id, d)} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-3 h-3" /></button>
+                                      </span>
+                                    ))}
+                                    <form onSubmit={(e) => {
+                                      e.preventDefault();
+                                      const i = e.currentTarget.elements.namedItem('d') as HTMLInputElement;
+                                      if (i.value) {
+                                        addSchoolDomain(school.id, i.value); 
+                                        i.value = '';
+                                      }
+                                    }} className="flex-1 min-w-[150px]">
+                                      <div className="relative">
+                                        <input name="d" placeholder="Add domain..." className="w-full px-3 py-1.5 bg-white border border-dashed border-slate-200 rounded-xl text-[10px] focus:outline-none focus:border-brand-500 transition-all pr-8" />
+                                        <button type="submit" className="absolute right-2 top-1/2 -translate-y-1/2 text-brand-600 hover:text-brand-700">
+                                          <Plus className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    </form>
+                                  </div>
+                                </div>
+
+                                {/* Specific Emails */}
+                                <div className="space-y-4">
+                                  <div className="flex items-center justify-between">
+                                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Specific Email Addresses</label>
+                                    <span className="text-[10px] text-slate-400 font-medium">e.g. office@school.com</span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    {(school.emailAddresses || []).map(email => (
+                                      <span key={email} className="px-3 py-1.5 bg-white border border-slate-100 rounded-xl text-[10px] font-bold flex items-center gap-2 text-slate-700 shadow-sm">
+                                        {email}
+                                        <button onClick={() => removeSchoolEmail(school.id, email)} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-3 h-3" /></button>
+                                      </span>
+                                    ))}
+                                    <form onSubmit={(e) => {
+                                      e.preventDefault();
+                                      const i = e.currentTarget.elements.namedItem('e') as HTMLInputElement;
+                                      if (i.value) {
+                                        addSchoolEmail(school.id, i.value); 
+                                        i.value = '';
+                                      }
+                                    }} className="flex-1 min-w-[150px]">
+                                      <div className="relative">
+                                        <input name="e" placeholder="Add email..." className="w-full px-3 py-1.5 bg-white border border-dashed border-slate-200 rounded-xl text-[10px] focus:outline-none focus:border-brand-500 transition-all pr-8" />
+                                        <button type="submit" className="absolute right-2 top-1/2 -translate-y-1/2 text-brand-600 hover:text-brand-700">
+                                          <Plus className="w-3 h-3" />
+                                        </button>
+                                      </div>
+                                    </form>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
                         </div>
 
-                        <div className="space-y-4">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School Keywords</label>
-                          <div className="flex flex-wrap gap-2">
-                            {profile?.schoolKeywords?.map(k => (
-                              <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
-                                {k}
-                                <button onClick={() => removeKeyword(k, 'school')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
-                              </span>
-                            ))}
-                            <form onSubmit={(e) => {
-                              e.preventDefault();
-                              const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
-                              addKeyword(i.value, 'school'); i.value = '';
-                            }}>
-                              <input name="k" placeholder="Add school keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                            </form>
+                        {/* Keywords (Moved here for better organization) */}
+                        <div className="pt-6 border-t border-slate-100 space-y-6">
+                          <div className="space-y-4">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Global School Keywords</label>
+                            <div className="flex flex-wrap gap-2">
+                              {profile?.schoolKeywords?.map(k => (
+                                <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
+                                  {k}
+                                  <button onClick={() => removeKeyword(k, 'school')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                                </span>
+                              ))}
+                              <form onSubmit={(e) => {
+                                e.preventDefault();
+                                const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
+                                addKeyword(i.value, 'school'); i.value = '';
+                              }}>
+                                <input name="k" placeholder="Add school keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                              </form>
+                            </div>
                           </div>
-                        </div>
 
-                        <div className="space-y-4">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Newsletter Keywords</label>
-                          <div className="flex flex-wrap gap-2">
-                            {profile?.newsletterKeywords?.map(k => (
-                              <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
-                                {k}
-                                <button onClick={() => removeKeyword(k, 'newsletter')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
-                              </span>
-                            ))}
-                            <form onSubmit={(e) => {
-                              e.preventDefault();
-                              const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
-                              addKeyword(i.value, 'newsletter'); i.value = '';
-                            }}>
-                              <input name="k" placeholder="Add newsletter keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                            </form>
+                          <div className="space-y-4">
+                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">Newsletter Keywords</label>
+                            <div className="flex flex-wrap gap-2">
+                              {profile?.newsletterKeywords?.map(k => (
+                                <span key={k} className="px-4 py-2 bg-slate-50 border border-slate-100 rounded-xl text-xs font-bold flex items-center gap-3 text-slate-700 break-all">
+                                  {k}
+                                  <button onClick={() => removeKeyword(k, 'newsletter')} className="text-slate-400 hover:text-red-500 transition-colors"><X className="w-4 h-4" /></button>
+                                </span>
+                              ))}
+                              <form onSubmit={(e) => {
+                                e.preventDefault();
+                                const i = e.currentTarget.elements.namedItem('k') as HTMLInputElement;
+                                addKeyword(i.value, 'newsletter'); i.value = '';
+                              }}>
+                                <input name="k" placeholder="Add newsletter keyword..." className="w-full px-4 py-2 bg-slate-50 border border-dashed border-slate-200 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                              </form>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -3271,7 +3545,7 @@ function SchoolSyncApp() {
                           </div>
                         )}
 
-                        {schools.length > 0 && (
+                        {allAvailableSchools.length > 0 && (
                           <div className="space-y-4">
                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em]">School</p>
                             <div className="flex flex-wrap gap-2">
@@ -3281,7 +3555,7 @@ function SchoolSyncApp() {
                               >
                                 All
                               </button>
-                              {schools.map(s => (
+                              {allAvailableSchools.map(s => (
                                 <button 
                                   key={s}
                                   onClick={() => setEmailFilter(f => ({ ...f, school: s }))}
@@ -3310,50 +3584,128 @@ function SchoolSyncApp() {
 
                       <div className="space-y-6">
                         <div className="grid grid-cols-1 gap-3">
-                          {profile?.children?.map(child => (
-                            <div key={child.id} className="p-4 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-between group">
-                              <div className="flex items-center gap-4">
-                                <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center border border-slate-100 shadow-sm font-bold text-brand-600">
-                                  {child.name.charAt(0)}
+                          {profile?.children?.map(child => {
+                            const school = schools.find(s => s.id === child.schoolId);
+                            return (
+                              <div key={child.id} className="p-4 bg-slate-50 border border-slate-100 rounded-2xl flex items-center justify-between group">
+                                <div className="flex items-center gap-4">
+                                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center border border-slate-100 shadow-sm font-bold text-brand-600">
+                                    {child.name.charAt(0)}
+                                  </div>
+                                  <div>
+                                    <p className="text-sm font-bold text-slate-900">{child.name}</p>
+                                    <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                      {child.grade ? `Grade ${child.grade}` : 'No Grade'} {school ? `• ${school.name}` : ''}
+                                    </p>
+                                  </div>
                                 </div>
-                                <div>
-                                  <p className="text-sm font-bold text-slate-900">{child.name}</p>
-                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
-                                    {child.grade ? `Grade ${child.grade}` : 'No Grade'} {child.school ? `• ${child.school}` : ''}
-                                  </p>
-                                </div>
+                                <button 
+                                  onClick={() => removeChild(child.id)}
+                                  className="p-2 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
-                              <button 
-                                onClick={() => removeChild(child.id)}
-                                className="p-2 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all opacity-0 group-hover:opacity-100"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            </div>
-                          ))}
+                            );
+                          })}
                           <form 
                             onSubmit={(e) => {
                               e.preventDefault();
                               const form = e.currentTarget;
                               const name = (form.elements.namedItem('name') as HTMLInputElement).value;
                               const grade = (form.elements.namedItem('grade') as HTMLInputElement).value;
-                              const school = (form.elements.namedItem('school') as HTMLInputElement).value;
+                              const schoolId = (form.elements.namedItem('schoolId') as HTMLSelectElement).value;
                               if (name) {
-                                addChild(name, grade, school);
+                                addChild(name, grade, schoolId);
                                 form.reset();
                               }
                             }}
                             className="p-4 bg-slate-50 border border-dashed border-slate-200 rounded-2xl space-y-3"
                           >
-                            <div className="grid grid-cols-3 gap-2">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                               <input name="name" placeholder="Name" className="px-3 py-2 bg-white border border-slate-100 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" required />
                               <input name="grade" placeholder="Grade" className="px-3 py-2 bg-white border border-slate-100 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
-                              <input name="school" placeholder="School" className="px-3 py-2 bg-white border border-slate-100 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all" />
+                              <select name="schoolId" className="px-3 py-2 bg-white border border-slate-100 rounded-xl text-xs focus:outline-none focus:border-brand-500 transition-all">
+                                <option value="">Select School...</option>
+                                {schools.map(s => (
+                                  <option key={s.id} value={s.id}>{s.name}</option>
+                                ))}
+                              </select>
                             </div>
                             <button type="submit" className="w-full py-2 bg-brand-600 text-white rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-brand-700 transition-all shadow-sm">
                               Add Child
                             </button>
                           </form>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Troubleshooting Section */}
+                  <div className="bg-amber-50 p-6 md:p-10 rounded-3xl border border-amber-100 shadow-sm space-y-6 md:space-y-8">
+                    <div className="flex items-center gap-4 md:gap-5">
+                      <div className="w-12 h-12 md:w-16 md:h-16 bg-amber-100 rounded-2xl flex items-center justify-center">
+                        <HelpCircle className="w-6 h-6 md:w-8 md:h-8 text-amber-600" />
+                      </div>
+                      <div>
+                        <h3 className="text-xl md:text-2xl font-bold text-amber-900">Troubleshooting</h3>
+                        <p className="text-xs md:text-sm text-amber-500 font-medium">Common issues and fixes</p>
+                      </div>
+                    </div>
+                    
+                    <div className="space-y-6">
+                      <div className="p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
+                        <p className="text-sm font-bold text-amber-900 mb-2">"Project Deleted" Error</p>
+                        <p className="text-xs text-amber-700 leading-relaxed mb-4">
+                          If you see an error saying your Google Cloud Project has been deleted, it means the OAuth credentials configured for this app are no longer valid.
+                        </p>
+                        <div className="space-y-3">
+                          <p className="text-[10px] font-bold text-amber-800 uppercase tracking-widest">How to fix:</p>
+                          <ol className="text-xs text-amber-700 list-decimal list-inside space-y-2">
+                            <li>Create a new project in the <a href="https://console.cloud.google.com/" target="_blank" rel="noopener noreferrer" className="underline font-bold">Google Cloud Console</a>.</li>
+                            <li>Enable the <strong>Gmail, Calendar, and Drive APIs</strong>.</li>
+                            <li>Create new <strong>OAuth 2.0 Client ID</strong> credentials.</li>
+                            <li>Update the <strong>GOOGLE_CLIENT_ID</strong> and <strong>GOOGLE_CLIENT_SECRET</strong> in your app secrets.</li>
+                            <li>Use the <strong>Force Reset Connection</strong> button above to clear old tokens.</li>
+                            <li><strong>Reconnect</strong> your Google account.</li>
+                          </ol>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
+                        <p className="text-sm font-bold text-amber-900 mb-2">Sync Issues</p>
+                        <p className="text-xs text-amber-700 leading-relaxed">
+                          If emails aren't syncing, ensure you have configured your <strong>Schools</strong> and <strong>Keywords</strong> correctly. The app only syncs emails from the domains and addresses you specify.
+                        </p>
+                      </div>
+
+                      <div className="p-4 bg-white rounded-2xl border border-amber-100 shadow-sm">
+                        <p className="text-sm font-bold text-amber-900 mb-2">School Configuration Issues</p>
+                        <p className="text-xs text-amber-700 leading-relaxed mb-4">
+                          If you can't see the school you added, or if you can't add a school, ensure you have a <strong>Family Group</strong> created. Schools are stored within your family group.
+                        </p>
+                        <div className="space-y-3">
+                          <p className="text-[10px] font-bold text-amber-800 uppercase tracking-widest">How to fix:</p>
+                          <ol className="text-xs text-amber-700 list-decimal list-inside space-y-2">
+                            <li>Check the <strong>Family Group</strong> card. If it says "Create Family Group", you must create one first.</li>
+                            <li>If you have a family group but still can't see your schools, try resetting your family connection.</li>
+                          </ol>
+                          <button 
+                            onClick={async () => {
+                              if (window.confirm("Are you sure you want to reset your family group connection? This will clear your family ID from your profile, allowing you to create or join a new group. It will NOT delete the family data itself.")) {
+                                try {
+                                  await updateDoc(doc(db, 'users', user.uid), { familyId: deleteField() });
+                                  setProfile(prev => prev ? { ...prev, familyId: undefined } : null);
+                                  window.location.reload();
+                                } catch (err) {
+                                  setError("Failed to reset family connection.");
+                                }
+                              }
+                            }}
+                            className="w-full py-2 bg-amber-100 text-amber-700 rounded-xl text-[10px] font-bold uppercase tracking-widest hover:bg-amber-200 transition-all"
+                          >
+                            Reset Family Connection
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -3406,7 +3758,6 @@ function SchoolSyncApp() {
                           profile: {
                             uid: user.uid,
                             email: user.email,
-                            domains: profile?.schoolDomains,
                             keywords: profile?.schoolKeywords,
                             lastSynced: profile?.lastSynced
                           },

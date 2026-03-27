@@ -32,6 +32,13 @@ service cloud.firestore {
     //   - status: string
     //   - familyId: string (required)
     //
+    // Collection: families/{familyId}/schools
+    //   - id: string (required)
+    //   - name: string (required)
+    //   - domains: list
+    //   - emailAddresses: list
+    //   - familyId: string (required)
+    //
     // Collection: invitations
     //   - id: string (required)
     //   - familyId: string (required)
@@ -78,6 +85,14 @@ service cloud.firestore {
              data.familyId is string;
     }
 
+    function isValidSchool(data) {
+      return data.keys().hasAll(['id', 'name', 'familyId']) &&
+             data.id is string &&
+             data.name is string &&
+             data.name.size() < 500 &&
+             data.familyId is string;
+    }
+
     function isValidInvitation(data) {
       return data.keys().hasAll(['id', 'familyId', 'email']) &&
              data.id is string &&
@@ -105,6 +120,13 @@ service cloud.firestore {
         allow read: if isFamilyMember(familyId);
         allow create: if isFamilyMember(familyId) && isValidSchoolEvent(request.resource.data);
         allow update: if isFamilyMember(familyId) && isValidSchoolEvent(request.resource.data);
+        allow delete: if isFamilyMember(familyId);
+      }
+
+      match /schools/{schoolId} {
+        allow read: if isFamilyMember(familyId);
+        allow create: if isFamilyMember(familyId) && isValidSchool(request.resource.data);
+        allow update: if isFamilyMember(familyId) && isValidSchool(request.resource.data);
         allow delete: if isFamilyMember(familyId);
       }
     }

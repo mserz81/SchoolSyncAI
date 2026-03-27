@@ -13,45 +13,44 @@ import firebaseConfig from "./firebase-applet-config.json" assert { type: "json"
 
 dotenv.config();
 
-const JWT_SECRET = process.env.JWT_SECRET;
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET environment variable is required');
-}
-
-const SESSION_SECRET = process.env.SESSION_SECRET;
-if (!SESSION_SECRET) {
-  throw new Error('SESSION_SECRET environment variable is required');
-}
-
-const APP_URL = process.env.APP_URL;
-if (!APP_URL) {
-  throw new Error('APP_URL environment variable is required');
-}
-
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-if (!GOOGLE_CLIENT_ID) {
-  throw new Error('GOOGLE_CLIENT_ID environment variable is required');
-}
-
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
-if (!GOOGLE_CLIENT_SECRET) {
-  throw new Error('GOOGLE_CLIENT_SECRET environment variable is required');
-}
+const JWT_SECRET = process.env.JWT_SECRET!;
+const SESSION_SECRET = process.env.SESSION_SECRET!;
+const APP_URL = (process.env.APP_URL || '').replace(/\/$/, '');
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID!;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET!;
 
 // Initialize Firebase Admin
 if (!admin.apps.length) {
+  console.log('Initializing Firebase Admin for project:', firebaseConfig.projectId);
   admin.initializeApp({
     credential: admin.credential.applicationDefault(),
     projectId: firebaseConfig.projectId,
   });
 }
 
-const firestore = firebaseConfig.firestoreDatabaseId 
-  ? getFirestore(firebaseConfig.firestoreDatabaseId)
-  : getFirestore();
+const databaseId = firebaseConfig.firestoreDatabaseId || '(default)';
+console.log('Using Firestore Database ID:', databaseId);
+const firestore = getFirestore(databaseId);
+
+// Test connection at startup
+(async () => {
+  try {
+    console.log('Testing Firestore connection...');
+    await firestore.collection('system_check').doc('startup').set({
+      timestamp: admin.firestore.FieldValue.serverTimestamp(),
+      message: 'Server started'
+    });
+    console.log('Firestore connection test successful');
+  } catch (error: any) {
+    console.error('Firestore connection test failed:', error.message);
+    if (error.message.includes('PERMISSION_DENIED')) {
+      console.error('CRITICAL: Service account lacks permissions for database:', databaseId);
+    }
+  }
+})();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 // Extend Request type for Firebase Auth
 interface AuthRequest extends Request {
@@ -84,8 +83,9 @@ const authenticate = async (req: AuthRequest, res: Response, next: NextFunction)
 
 // OAuth2 client setup
 const getRedirectUri = () => {
-  const baseUrl = APP_URL.replace(/\/$/, '');
-  return `${baseUrl}/auth/callback`;
+  const uri = `${APP_URL}/auth/callback`;
+  console.log('Constructed Redirect URI:', uri);
+  return uri;
 };
 
 const SCOPES = [
@@ -105,17 +105,17 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 
-if (isProduction) {
-  app.set('trust proxy', 1);
-}
+// AI Studio and Cloud Run are behind proxies
+app.set('trust proxy', 1);
 
 app.use(session({
   secret: SESSION_SECRET,
-  resave: false,
-  saveUninitialized: false,
+  resave: true,
+  saveUninitialized: true,
+  proxy: true, // Required when trust proxy is set and secure: true
   cookie: {
-    secure: isProduction,
-    sameSite: isProduction ? 'none' : 'lax',
+    secure: true, // Required for SameSite=None
+    sameSite: 'none', // Required for cross-origin iframe/popup context
     httpOnly: true,
     maxAge: 15 * 60 * 1000
   }
@@ -135,17 +135,14 @@ app.get("/api/auth/url", authenticate, (req: AuthRequest, res) => {
   const uid = req.user?.uid;
   if (!uid) return res.status(401).json({ error: 'Unauthorized' });
 
-  // Store uid in session to prevent OAuth CSRF/Account Linking
-  req.session.uid = uid; 
+  // Generate a signed state bound to the user
+  const state = jwt.sign({ uid }, JWT_SECRET, { expiresIn: '15m' });
 
   const oauth2Client = new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     getRedirectUri()
   );
-
-  // Generate a signed state bound to the user
-  const state = jwt.sign({ uid }, JWT_SECRET, { expiresIn: '15m' });
 
   const authUrl = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -165,11 +162,9 @@ app.get("/auth/callback", async (req, res) => {
     const decoded = jwt.verify(state as string, JWT_SECRET) as { uid: string };
     const uid = decoded.uid;
 
-    // Verify that the user finishing the flow is the same user who initiated it
-    const sessionUid = req.session.uid;
-    if (!sessionUid || sessionUid !== uid) {
-      console.error("OAuth CSRF detected or session expired", { sessionUid, jwtUid: uid });
-      return res.status(401).send("Authentication failed: Session mismatch or expired. Please try again.");
+    if (!uid) {
+      console.error("OAuth State Error: No UID in token");
+      return res.status(401).send("Authentication failed: Invalid state token.");
     }
 
     const oauth2Client = new google.auth.OAuth2(
@@ -181,8 +176,6 @@ app.get("/auth/callback", async (req, res) => {
     
     // Store tokens securely in Firestore (server-side only)
     await firestore.collection('server_tokens').doc(uid).set(tokens);
-
-    delete req.session.uid;
 
     const appUrl = APP_URL.replace(/\/$/, '');
 
@@ -202,11 +195,72 @@ app.get("/auth/callback", async (req, res) => {
         </body>
       </html>
     `);
-  } catch (error) {
-    console.error("Error exchanging code for tokens or verifying state:", error);
-    res.status(401).send("Authentication failed: Invalid state or code");
+  } catch (error: any) {
+    console.error("OAuth Callback Error:", {
+      message: error.message,
+      stack: error.stack,
+      query: req.query
+    });
+    
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).send(`Authentication failed: Invalid or expired state token (${error.message})`);
+    }
+    
+    res.status(401).send(`Authentication failed: ${error.message || "Invalid state or code"}`);
   }
 });
+
+// Clear Google Tokens (Force Reset)
+app.post("/api/auth/clear", authenticate, async (req: AuthRequest, res) => {
+  const uid = req.user?.uid;
+  if (!uid) return res.status(401).json({ error: 'Unauthorized' });
+
+  try {
+    await firestore.collection('server_tokens').doc(uid).delete();
+    await firestore.collection('users').doc(uid).update({ googleConnected: false });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error clearing tokens:', error);
+    res.status(500).json({ error: 'Failed to clear tokens' });
+  }
+});
+
+// Helper to handle Google API errors
+function handleGoogleError(error: any, context: string, res: Response) {
+  const message = error.message || '';
+  const isProjectDeleted = message.includes('Project') && message.includes('deleted');
+  const isAuthExpired = message.includes('invalid_grant') || message.includes('No refresh token');
+
+  if (isProjectDeleted) {
+    console.error(`[CRITICAL] ${context} failed: Google Cloud Project has been deleted. This is a configuration issue, not a bug.`);
+    console.error(`Current Config Debug:
+- APP_URL: ${APP_URL}
+- GOOGLE_CLIENT_ID Prefix: ${GOOGLE_CLIENT_ID?.substring(0, 10)}...
+- Redirect URI: ${getRedirectUri()}`);
+    console.error(`To fix this, you MUST:
+1. Create a NEW project in the Google Cloud Console (https://console.cloud.google.com/).
+2. Enable Gmail, Calendar, and Drive APIs.
+3. Create new OAuth 2.0 credentials.
+4. Update GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in your environment/secrets.
+5. Disconnect and reconnect your Google account in the app.`);
+    
+    return res.status(500).json({ 
+      error: 'Google Cloud Project Deleted',
+      details: 'The Google Cloud Project associated with your OAuth credentials has been deleted. This usually happens if the project was a temporary trial or was manually removed. You must create a new project in the Google Cloud Console, enable the required APIs (Gmail, Calendar, Drive), and update your GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the app settings.'
+    });
+  }
+
+  console.error(`${context} error:`, error);
+  
+  if (isAuthExpired) {
+    return res.status(401).json({ 
+      error: 'Authentication Expired',
+      details: 'Your Google connection has expired or been revoked. Please disconnect and reconnect your Google account in Settings.'
+    });
+  }
+
+  res.status(500).json({ error: `Failed to ${context.toLowerCase()}` });
+}
 
 // Gmail API - List messages
 app.post("/api/gmail/list", authenticate, async (req: AuthRequest, res) => {
@@ -232,8 +286,7 @@ app.post("/api/gmail/list", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    console.error('Gmail list error:', error);
-    res.status(500).json({ error: 'Failed to fetch Gmail messages' });
+    handleGoogleError(error, 'Gmail list', res);
   }
 });
 
@@ -259,8 +312,7 @@ app.post("/api/gmail/message", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    console.error('Gmail message error:', error);
-    res.status(500).json({ error: 'Failed to fetch Gmail message' });
+    handleGoogleError(error, 'Gmail message', res);
   }
 });
 
@@ -286,8 +338,7 @@ app.post("/api/calendar/create", authenticate, async (req: AuthRequest, res) => 
     });
     res.json(response.data);
   } catch (error) {
-    console.error('Calendar create error:', error);
-    res.status(500).json({ error: 'Failed to create calendar event' });
+    handleGoogleError(error, 'Calendar create', res);
   }
 });
 
@@ -316,8 +367,7 @@ app.post("/api/calendar/list", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    console.error('Calendar list error:', error);
-    res.status(500).json({ error: 'Failed to fetch calendar events' });
+    handleGoogleError(error, 'Calendar list', res);
   }
 });
 
@@ -359,8 +409,7 @@ app.post("/api/drive/ensure-folder", authenticate, async (req: AuthRequest, res)
 
     res.json({ folderId: createResponse.data.id });
   } catch (error) {
-    console.error('Drive ensure-folder error:', error);
-    res.status(500).json({ error: 'Failed to prepare Drive folder' });
+    handleGoogleError(error, 'Drive ensure-folder', res);
   }
 });
 
@@ -408,8 +457,7 @@ app.post("/api/drive/save-url", authenticate, async (req: AuthRequest, res) => {
 
     res.json(response.data);
   } catch (error) {
-    console.error('Drive save-url error:', error);
-    res.status(500).json({ error: 'Failed to save file to Drive' });
+    handleGoogleError(error, 'Drive save-url', res);
   }
 });
 
@@ -438,12 +486,30 @@ app.post("/api/drive/upload", authenticate, async (req: AuthRequest, res) => {
     });
     res.json(response.data);
   } catch (error) {
-    console.error('Drive upload error:', error);
-    res.status(500).json({ error: 'Failed to upload file to Drive' });
+    handleGoogleError(error, 'Drive upload', res);
   }
 });
 
 async function startServer() {
+  // Validate environment variables
+  const requiredEnv = [
+    'JWT_SECRET',
+    'SESSION_SECRET',
+    'APP_URL',
+    'GOOGLE_CLIENT_ID',
+    'GOOGLE_CLIENT_SECRET'
+  ];
+
+  for (const env of requiredEnv) {
+    const value = process.env[env];
+    if (!value) {
+      throw new Error(`${env} environment variable is required`);
+    }
+    if (env === 'APP_URL' && !value.startsWith('http')) {
+      throw new Error('APP_URL must be a valid URL starting with http:// or https://');
+    }
+  }
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { 
@@ -534,4 +600,7 @@ app.listen(PORT, "0.0.0.0", () => {
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal startup error:', err);
+  process.exit(1);
+});

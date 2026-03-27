@@ -12,9 +12,35 @@
         "familyId": { "type": "string" },
         "schoolKeywords": { "type": "array", "items": { "type": "string" } },
         "newsletterKeywords": { "type": "array", "items": { "type": "string" } },
+        "children": { "type": "array", "items": { "$ref": "Child" } },
         "lastSynced": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email"]
+    },
+    "Child": {
+      "title": "Child",
+      "description": "Information about a child in the family.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "grade": { "type": "string" },
+        "schoolId": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "School": {
+      "title": "School",
+      "description": "Configuration for a school.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "domains": { "type": "array", "items": { "type": "string" } },
+        "emailAddresses": { "type": "array", "items": { "type": "string" } },
+        "familyId": { "type": "string" }
+      },
+      "required": ["id", "name", "familyId"]
     },
     "Family": {
       "title": "Family Group",
@@ -73,6 +99,10 @@
     "/families/{familyId}/events/{eventId}": {
       "schema": "SchoolEvent",
       "description": "Extracted events for a family."
+    },
+    "/families/{familyId}/schools/{schoolId}": {
+      "schema": "School",
+      "description": "Configured schools for a family."
     },
     "/invitations/{invitationId}": {
       "schema": "Invitation",
